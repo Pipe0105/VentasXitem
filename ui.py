@@ -5,12 +5,13 @@ import pandas as pd
 # ====== CSS global (colores y detalles visuales) ======
 APP_CSS = """
 <style>
-/* Layout más estrecho y tipografía */
+/* Layout y tipografía */
 .main .block-container {padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1400px;}
 h1, h2, h3 {letter-spacing: .2px}
 
-/* Top bar */
+/* Top bar sticky */
 .app-topbar {
+  position: sticky; top: 0; z-index: 10;
   display:flex; align-items:center; gap:.75rem; padding:.8rem 1.2rem;
   border:1px solid rgba(0,0,0,.08); border-radius:14px;
   background:linear-gradient(180deg,#ffffff .1%, #fdfdfd);
@@ -32,9 +33,10 @@ h1, h2, h3 {letter-spacing: .2px}
 /* KPI */
 .kpi {text-align:left}
 .kpi .value {font-weight:700; font-size:1.6rem; line-height:1}
+.kpi .delta {color:#6b7280; font-size:.9rem; margin-top:.2rem}
 .kpi .label {color:#6b7280; font-size:.85rem}
 
-/* Chips (toggles) */
+/* Chips (estado) */
 .chips {display:flex; gap:.5rem; flex-wrap:wrap; margin:.25rem 0}
 .chip {
   border:1px solid #e5e7eb; border-radius:999px; padding:.25rem .7rem; font-size:.85rem; cursor:default;
@@ -67,25 +69,31 @@ def topbar(title: str, subtitle: str = "", badge: str = "Ventas x Ítem"):
         unsafe_allow_html=True
     )
 
-def kpi_row(ur_total: int, ub_total: int, sedes_activas: int):
+def kpi_row(ur_total: int, ub_total: int, sedes_activas: int, ur_delta: str = "—", ub_delta: str = "—"):
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown('<div class="card kpi"><div class="label">UR total (rango)</div>'
-                    f'<div class="value">{ur_total:,}</div></div>'.replace(",", "."), unsafe_allow_html=True)
+                    f'<div class="value">{ur_total:,}</div>'
+                    f'<div class="delta">{ur_delta}</div></div>'.replace(",", "."),
+                    unsafe_allow_html=True)
     with c2:
         st.markdown('<div class="card kpi"><div class="label">UB total (rango)</div>'
-                    f'<div class="value">{ub_total:,}</div></div>'.replace(",", "."), unsafe_allow_html=True)
+                    f'<div class="value">{ub_total:,}</div>'
+                    f'<div class="delta">{ub_delta}</div></div>'.replace(",", "."),
+                    unsafe_allow_html=True)
     with c3:
         st.markdown('<div class="card kpi"><div class="label">Sedes con movimiento</div>'
-                    f'<div class="value">{sedes_activas:,}</div></div>'.replace(",", "."), unsafe_allow_html=True)
+                    f'<div class="value">{sedes_activas:,}</div></div>'.replace(",", "."),
+                    unsafe_allow_html=True)
 
 def chips_row(items_count: int, rango_texto: str, solo_con_datos: bool):
     on_cls = "chip on" if solo_con_datos else "chip"
     st.markdown(
         f"""
         <div class="chips">
-          <div class="chip">Ítems seleccionados: <b>{items_count}</b></div>
+          <div class="chip">Ítems: <b>{items_count}</b></div>
           <div class="chip">Rango: <b>{rango_texto}</b></div>
+          <div class="{on_cls}">Solo con datos</div>
         </div>
         """,
         unsafe_allow_html=True
@@ -94,10 +102,7 @@ def chips_row(items_count: int, rango_texto: str, solo_con_datos: bool):
 def table_card(df: pd.DataFrame, title: str, styled=False):
     st.markdown('<div class="table-card">', unsafe_allow_html=True)
     st.subheader(title)
-    if styled:
-        st.dataframe(df, use_container_width=True)
-    else:
-        st.dataframe(df, use_container_width=True)
+    st.dataframe(df, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 def footer_note():

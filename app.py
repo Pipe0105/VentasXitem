@@ -1,5 +1,6 @@
 # app.py
 import io
+from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -34,18 +35,38 @@ except Exception as e:
     st.error(str(e))
     st.stop()
 
+# ========= Presets de fecha =========
+def _set_range(days=None, this_month=False, prev_month=False):
+    if "fecha_dt" in df and df["fecha_dt"].notna().any():
+        dtmax = df["fecha_dt"].max().date()
+        if days is not None:
+            st.session_state["_date_range"] = (dtmax - timedelta(days=days-1), dtmax)
+        elif this_month:
+            start = dtmax.replace(day=1)
+            st.session_state["_date_range"] = (start, dtmax)
+        elif prev_month:
+            first_this = dtmax.replace(day=1)
+            last_prev  = first_this - timedelta(days=1)
+            start_prev = last_prev.replace(day=1)
+            st.session_state["_date_range"] = (start_prev, last_prev)
+
+colp1, colp2, colp3, colp4 = st.columns(4)
+with colp1: st.button("Hoy",        use_container_width=True, on_click=_set_range, kwargs={"days":1})
+with colp2: st.button("7 días",     use_container_width=True, on_click=_set_range, kwargs={"days":7})
+with colp3: st.button("Este mes",   use_container_width=True, on_click=_set_range, kwargs={"this_month":True})
+with colp4: st.button("Mes anterior", use_container_width=True, on_click=_set_range, kwargs={"prev_month":True})
+
 # ========= Filtro de rango de fechas (si hay fecha completa) =========
 if df["fecha_dt"].notna().any():
     min_date = df["fecha_dt"].min().date()
     max_date = df["fecha_dt"].max().date()
-    rango = st.date_input(
-        "Rango de fechas",
-        value=(min_date, max_date),
-        min_value=min_date,
-        max_value=max_date
-    )
+    value_range = st.session_state.get("_date_range", (min_date, max_date))
+    # Clamp a bordes reales
+    vr0 = (max(min_date, value_range[0]), min(max_date, value_range[1]))
+    rango = st.date_input("Rango de fechas", value=vr0, min_value=min_date, max_value=max_date)
     if isinstance(rango, tuple) and len(rango) == 2:
         d1, d2 = rango
+        st.session_state["_date_range"] = (d1, d2)
         mask = (df["fecha_dt"].dt.date >= d1) & (df["fecha_dt"].dt.date <= d2)
         df_view = df.loc[mask].copy()
     else:
@@ -142,16 +163,33 @@ df_UB_disp = format_df_fast(tabla_UB, show_dash) if not tabla_UB.empty else pd.D
 # ========= Título resumido (inteligente) =========
 titulo_tabla = build_title_resumido(df_view, id_items_sel, top_groups=2)
 
-# ========= KPIs y chips de estado =========
-# Totales sobre el rango filtrado y selección
+# ========= KPIs y delta vs periodo anterior =========
 df_sel = df_view[df_view["id_item"].isin(id_items_sel)]
 ur_total = int(df_sel["und_dia"].sum())
 ub_total = int(df_sel["ub_unidades"].sum())
-# Sedes activas (según UR>0)
+
+# Sedes activas (UR>0)
 agg_sel = agg[agg["id_item"].isin(id_items_sel)]
 sedes_activas = int((agg_sel.groupby("sede_key")["UR"].sum() > 0).sum())
 
-kpi_row(ur_total, ub_total, sedes_activas)
+# Delta respecto al periodo anterior de igual largo
+if df_view["fecha_dt"].notna().any():
+    d1, d2 = df_view["fecha_dt"].min().date(), df_view["fecha_dt"].max().date()
+    days = (d2 - d1).days + 1
+    prev_start = d1 - timedelta(days=days)
+    prev_end   = d1 - timedelta(days=1)
+    df_prev = df[(df["fecha_dt"].dt.date >= prev_start) & (df["fecha_dt"].dt.date <= prev_end) & (df["id_item"].isin(id_items_sel))]
+    ur_prev, ub_prev = int(df_prev["und_dia"].sum()), int(df_prev["ub_unidades"].sum())
+    def _delta(cur, prev):
+        if prev == 0: return "—"
+        pct = (cur - prev) / prev * 100
+        sign = "▲" if pct >= 0 else "▼"
+        return f"{sign} {pct:.1f}%"
+    ur_delta, ub_delta = _delta(ur_total, ur_prev), _delta(ub_total, ub_prev)
+else:
+    ur_delta = ub_delta = "—"
+
+kpi_row(ur_total, ub_total, sedes_activas, ur_delta=ur_delta, ub_delta=ub_delta)
 
 # Texto de rango
 if df_view["fecha_dt"].notna().any():

@@ -11,12 +11,17 @@ h1, h2, h3 {letter-spacing: .2px}
 
 /* Top bar */
 .app-topbar {
-  display:flex; align-items:center; gap:.75rem; padding:.6rem 1rem;
-  border:1px solid rgba(0,0,0,.06); border-radius:14px; background:linear-gradient(180deg,#ffffff .1%, #fafafa);
-  box-shadow: 0 8px 18px rgba(0,0,0,.04);
+  display:flex; align-items:center; gap:.75rem; padding:.8rem 1.2rem;
+  border:1px solid rgba(0,0,0,.08); border-radius:14px;
+  background:linear-gradient(180deg,#ffffff .1%, #fdfdfd);
+  box-shadow: 0 6px 14px rgba(0,0,0,.05);
 }
-.app-badge {font-weight:600; font-size:.85rem; color:#2563eb; background:#eaf1ff; padding:.2rem .5rem; border-radius:999px;}
-.app-subtle {color:#6b7280}
+.app-badge {
+  font-weight:600; font-size:.85rem; color:#2563eb;
+  background:#eaf1ff; padding:.25rem .6rem; border-radius:999px;
+}
+.app-title {font-weight:700; font-size:1.1rem; color:#111827;}
+.app-subtle {color:#6b7280; font-size:.9rem}
 
 /* Cards */
 .card {
@@ -49,19 +54,18 @@ def inject_css():
     st.markdown(APP_CSS, unsafe_allow_html=True)
 
 def topbar(title: str, subtitle: str = "", badge: str = "Ventas x Ítem"):
-    with st.container():
-        st.markdown(
-            f"""
-            <div class="app-topbar">
-              <div class="app-badge">{badge}</div>
-              <div>
-                <div style="font-weight:700">{title}</div>
-                <div class="app-subtle">{subtitle}</div>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+    st.markdown(
+        f"""
+        <div class="app-topbar">
+          <div class="app-badge">{badge}</div>
+          <div>
+            <div class="app-title">{title}</div>
+            <div class="app-subtle">{subtitle}</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 def kpi_row(ur_total: int, ub_total: int, sedes_activas: int):
     c1, c2, c3 = st.columns(3)
@@ -82,7 +86,6 @@ def chips_row(items_count: int, rango_texto: str, solo_con_datos: bool):
         <div class="chips">
           <div class="chip">Ítems seleccionados: <b>{items_count}</b></div>
           <div class="chip">Rango: <b>{rango_texto}</b></div>
-          <div class="{on_cls}">Solo con datos</div>
         </div>
         """,
         unsafe_allow_html=True

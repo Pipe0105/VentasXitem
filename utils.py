@@ -2,7 +2,7 @@
 import re, string, unicodedata
 import numpy as np
 import pandas as pd
-from constants import ALIASES, SEDE_NAME_MAP, MONTH_ABBR_ES
+from constants import ALIASES, SEDE_NAME_MAP, MONTH_ABBR_ES  # MONTH_ABBR_ES se mantiene por compatibilidad
 
 # ---------------- Columnas y sedes ----------------
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -96,6 +96,8 @@ def make_base_name(desc: str, max_tokens: int = 2) -> str:
     return base.title()
 
 # ---------------- Tablas: helpers ----------------
+SPANISH_DOW = ["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"]
+
 def _order_sede_columns(cols):
     expected = []
     for _, mapping in SEDE_NAME_MAP.items():
@@ -104,12 +106,29 @@ def _order_sede_columns(cols):
     extras = [c for c in cols if c not in expected]
     return expected + extras
 
-def _fecha_label_from_group(dias: pd.Series, mes_map: dict) -> pd.Series:
-    out = dias.astype("Int64").astype(str)
-    if mes_map:
-        as_int = dias.astype("Int64").fillna(0).astype(int)
-        return as_int.map(lambda d: f"{d}/{MONTH_ABBR_ES.get(int(mes_map.get(d, 0)), '')}".rstrip("/"))
-    return out
+def _fecha_label_from_group(dias: pd.Series, mes_map: dict, anio: int = None, mes: int = None) -> pd.Series:
+    """
+    Convierte el número de día en etiqueta 'día/dow' (ej. '5/Jue').
+    Si se conoce año y mes, se calcula el día de la semana real.
+    Si no se conocen, devuelve solo el día como string.
+    """
+    labels = []
+    dias_int = dias.astype("Int64")
+    for d in dias_int:
+        if pd.isna(d):
+            labels.append("")
+            continue
+        d = int(d)
+        if anio and mes:
+            try:
+                fecha = pd.Timestamp(year=anio, month=mes, day=d)
+                dow = SPANISH_DOW[fecha.weekday()]  # 0=Lun .. 6=Dom
+                labels.append(f"{d}/{dow}")
+            except Exception:
+                labels.append(str(d))
+        else:
+            labels.append(str(d))
+    return pd.Series(labels, index=dias.index)
 
 def format_df_fast(df_in: pd.DataFrame, dash_zero: bool) -> pd.DataFrame:
     dfv = df_in.copy()

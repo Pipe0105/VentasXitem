@@ -1,15 +1,17 @@
 """
 App: Ventas x Item – UR/UB robusto por día x sede (multi-item hasta 10)
 
-Cambios clave:
-- Parseo de fecha explícito para evitar warnings de Pandas.
-- Nunca escribir '-' en columnas numéricas (se formatea en pantalla con Styler).
-- Streamlit: usar width='stretch' en st.dataframe.
-- ⚡ Precálculo y cache en sesión de tablas UR/UB por selección de ítems (toggle instantáneo).
+Mejoras de performance para cambio instantáneo UR/UB:
+- Pre-proceso y pre-agregado cacheados con @st.cache_data.
+- Agregado único (UR/UB) a nivel (dia_mes, mes_num, sede_key, id_item).
+- Construcción de tabla desde agregado (filtrar + pivot) ultra liviana.
+- Render simultáneo en tabs (UR y UB) para cambio instantáneo (sin recomputar).
+- Sin Styler (que es lento); formateo vectorizado y column_config.
 """
 
 import io
 import re
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -19,7 +21,6 @@ SEDE_NAME_MAP = {
     "mtodo": {"1": "Floresta","2": "Floralia","3": "Guadua"},
     "bogota": {"1": "Calle 80","2": "Chía"},
 }
-
 MONTH_ABBR_ES = {1:"Ene",2:"Feb",3:"Mar",4:"Abr",5:"May",6:"Jun",7:"Jul",8:"Ago",9:"Sep",10:"Oct",11:"Nov",12:"Dic"}
 
 # ===================== Aliases =====================
@@ -34,7 +35,6 @@ ALIASES = {
     "ub_factor": {"ub_factor","factor","contenido","presentacion","presentación","unid_x","unidx","und_pack","unidades_por","pack","x"},
 }
 
-# ===================== Helpers de nombres/estandarización =====================
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     cols = df.columns.to_series().astype(str).str.strip().str.lower()
     mapping = {}
@@ -62,12 +62,11 @@ def sede_key_to_name(sede_key: str) -> str:
 
 # ===================== Fechas robustas =====================
 def parse_dates_strict(series: pd.Series) -> pd.Series:
-    """Intenta formatos comunes; si no, fallback con dayfirst=True. Devuelve datetime (nullable)."""
     s = series.astype(str).str.strip()
     formats = ("%d/%m/%Y","%Y-%m-%d","%d-%m-%Y","%d/%m/%y","%Y/%m/%d")
     for fmt in formats:
         dt = pd.to_datetime(s, format=fmt, errors="coerce")
-        if dt.notna().mean() >= 0.8:  # si 80%+ matchea, adoptamos ese formato
+        if dt.notna().mean() >= 0.8:
             return dt
     return pd.to_datetime(s, dayfirst=True, errors="coerce")
 
@@ -86,10 +85,9 @@ def parse_und_dia_series(s: pd.Series) -> pd.Series:
     only_comma = s.str.contains(",") & ~s.str.contains(r"\.")
     s = s.where(~only_comma, s.str.replace(",", "", regex=False))
     out = pd.to_numeric(s, errors="coerce").fillna(0)
-    # usamos Int64 (nullable) para evitar errores cuando haya NA en algún flujo
     return out.round().astype("Int64")
 
-# ===================== Parsers UB: peso / volumen / conteo =====================
+# ===================== Parsers UB =====================
 NUM = r"(\d+(?:[.,]\d+)?)"
 WEIGHT_RE = re.compile(rf"{NUM}\s*(kg|kilo|kilogramo|kilogramos|kg\.)|{NUM}\s*(g|gr|gramo|gramos|g\.)", re.IGNORECASE)
 VOL_RE    = re.compile(rf"{NUM}\s*(l|lt|litro|litros|l\.)|{NUM}\s*(cl|centilitro|centilitros)|{NUM}\s*(ml|mililitro|mililitros)", re.IGNORECASE)
@@ -103,23 +101,21 @@ def extract_weight_grams(text: str):
     if not isinstance(text, str) or not text.strip(): return None
     m = WEIGHT_RE.search(text)
     if not m: return None
-    if m.group(1):  # kilos
-        kg = _to_float(m.group(1))
-        return int(round(kg * 1000)) if kg is not None else None
-    if m.group(3):  # gramos
-        g = _to_float(m.group(3))
-        return int(round(g)) if g is not None else None
+    if m.group(1):
+        kg = _to_float(m.group(1)); return int(round(kg * 1000)) if kg is not None else None
+    if m.group(3):
+        g = _to_float(m.group(3));  return int(round(g)) if g is not None else None
     return None
 
 def extract_volume_ml(text: str):
     if not isinstance(text, str) or not text.strip(): return None
     m = VOL_RE.search(text)
     if not m: return None
-    if m.group(1):  # litros
+    if m.group(1):
         l = _to_float(m.group(1));  return int(round(l * 1000)) if l is not None else None
-    if m.group(3):  # centilitros
+    if m.group(3):
         cl = _to_float(m.group(3)); return int(round(cl * 10)) if cl is not None else None
-    if m.group(5):  # mililitros
+    if m.group(5):
         ml = _to_float(m.group(5)); return int(round(ml)) if ml is not None else None
     return None
 
@@ -145,16 +141,21 @@ def normalize_ub_unit(unit: str) -> str:
     if u in {"l","lt","litro","litros","l."}: return "l"
     return "u"
 
-# ===================== Preproceso =====================
-def preprocess(df_in: pd.DataFrame) -> pd.DataFrame:
-    df = standardize_columns(df_in.copy())
-
+# ===================== Preproceso + agregado cacheados =====================
+@st.cache_data(show_spinner=False)
+def preprocess_cached(file_bytes: bytes, filename: str):
+    # leer
+    if filename.lower().endswith(".csv"):
+        df_raw = pd.read_csv(io.BytesIO(file_bytes))
+    else:
+        df_raw = pd.read_excel(io.BytesIO(file_bytes))
+    # normalizar
+    df = standardize_columns(df_raw)
     required = {"empresa", "fecha_dcto", "id_co", "id_item", "und_dia"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Faltan columnas requeridas (después de normalizar): {missing}")
-
-    # Fechas
+    # fechas
     parsed = parse_dates_strict(df["fecha_dcto"])
     if parsed.notna().any():
         df["dia_mes"] = parsed.dt.day.astype("Int64")
@@ -166,7 +167,6 @@ def preprocess(df_in: pd.DataFrame) -> pd.DataFrame:
         df["dia_mes"] = day
         df["mes_num"] = pd.Series([pd.NA]*len(df), dtype="Int64")
 
-    # Normalizaciones
     df["empresa"] = df["empresa"].map(unify_empresa)
     idco_num = pd.to_numeric(df["id_co"], errors="coerce")
     df["id_co"] = (idco_num.round().astype("Int64").astype(str)
@@ -176,11 +176,8 @@ def preprocess(df_in: pd.DataFrame) -> pd.DataFrame:
     if "descripcion" in df.columns:
         df["descripcion"] = df["descripcion"].astype(str)
 
-    # UR
     df["und_dia"] = parse_und_dia_series(df["und_dia"])
 
-    # ===== UB por fila: prioridad peso > volumen > conteo =====
-    # Explícitos (si existen)
     if "ub_factor" in df.columns:
         ef = pd.to_numeric(df["ub_factor"], errors="coerce").fillna(0)
         ef = ef.where(ef > 0, 0).astype(float)
@@ -192,106 +189,105 @@ def preprocess(df_in: pd.DataFrame) -> pd.DataFrame:
     else:
         eu = pd.Series([""]*len(df), index=df.index)
 
-    # Desde descripción
     grams_desc = df["descripcion"].map(extract_weight_grams) if "descripcion" in df.columns else pd.Series([None]*len(df), index=df.index)
     ml_desc    = df["descripcion"].map(extract_volume_ml)   if "descripcion" in df.columns else pd.Series([None]*len(df), index=df.index)
     cnt_desc   = df["descripcion"].map(extract_count_units) if "descripcion" in df.columns else pd.Series([None]*len(df), index=df.index)
 
-    ub_factor_val = []
-    ub_unit_type  = []
-    for i in df.index:
-        g = grams_desc[i]
-        v = ml_desc[i]
-        c = cnt_desc[i]
-        ef_i = ef[i]
-        eu_i = eu[i]
+    ub_factor_val = np.empty(len(df), dtype=float)
+    ub_unit_type  = np.empty(len(df), dtype=object)
 
-        # prioridad: peso > volumen > unitario
+    for i in range(len(df)):
+        g = grams_desc.iloc[i]
+        v = ml_desc.iloc[i]
+        c = cnt_desc.iloc[i]
+        ef_i = ef.iloc[i]
+        eu_i = eu.iloc[i]
         if g is not None:
-            ub_factor_val.append(float(g)); ub_unit_type.append("g")
+            ub_factor_val[i] = float(g);   ub_unit_type[i] = "g"
         elif v is not None:
-            ub_factor_val.append(float(v)); ub_unit_type.append("ml")
+            ub_factor_val[i] = float(v);   ub_unit_type[i] = "ml"
         elif eu_i in {"kg","g"} and ef_i > 0:
-            # convertir kg a g
             grams = ef_i*1000.0 if eu_i == "kg" else ef_i
-            ub_factor_val.append(float(grams)); ub_unit_type.append("g")
+            ub_factor_val[i] = float(grams); ub_unit_type[i] = "g"
         elif eu_i in {"l","ml"} and ef_i > 0:
-            # convertir litros a ml
             ml = ef_i*1000.0 if eu_i == "l" else ef_i
-            ub_factor_val.append(float(ml)); ub_unit_type.append("ml")
+            ub_factor_val[i] = float(ml);   ub_unit_type[i] = "ml"
         elif ef_i > 0:
-            ub_factor_val.append(float(ef_i)); ub_unit_type.append("u")
+            ub_factor_val[i] = float(ef_i); ub_unit_type[i] = "u"
         elif c is not None and c > 0:
-            ub_factor_val.append(float(c));   ub_unit_type.append("u")
+            ub_factor_val[i] = float(c);    ub_unit_type[i] = "u"
         else:
-            ub_factor_val.append(1.0);        ub_unit_type.append("u")
+            ub_factor_val[i] = 1.0;         ub_unit_type[i] = "u"
 
-    df["ub_factor_val"] = pd.Series(ub_factor_val, index=df.index)
-    df["ub_unit_type"]  = pd.Series(ub_unit_type,  index=df.index)
+    df["ub_factor_val"] = ub_factor_val
+    df["ub_unit_type"]  = ub_unit_type
     df["ub_unidades"]   = (df["und_dia"].astype("Float64") * pd.Series(ub_factor_val, index=df.index).astype("Float64")).round().astype("Int64")
 
-    return df
+    # ------- PRE-AGREGADO (UR y UB) cacheable -------
+    agg = (df.groupby(["dia_mes","mes_num","sede_key","id_item"], as_index=False)
+             .agg(UR=("und_dia","sum"), UB=("ub_unidades","sum")))
 
-# ===================== Tabla (UR / UB) =====================
-def build_table_multi(df: pd.DataFrame, id_items_sel: list[str], metric: str = "UR") -> pd.DataFrame:
-    if not id_items_sel: return pd.DataFrame()
+    # nombre sede visible fijo en el agregado
+    agg["sede_name"] = agg["sede_key"].map(lambda k: sede_key_to_name(str(k)))
 
-    id_items_sel = [str(x).strip() for x in id_items_sel]
-    dff = df[df["id_item"].isin(id_items_sel)].copy()
-    if dff.empty: return pd.DataFrame()
+    return df, agg
 
-    value_col = "und_dia" if metric == "UR" else "ub_unidades"
-
-    pivot = dff.pivot_table(
-        index="dia_mes", columns="sede_key", values=value_col,
-        aggfunc="sum", fill_value=0, dropna=False,
-    )
-
-    # Días presentes
-    all_days = sorted(dff["dia_mes"].dropna().unique())
-    pivot = pivot.reindex(all_days, fill_value=0)
-
-    # Columnas con nombres de sede (agrupar repetidas)
-    new_cols = {col: sede_key_to_name(str(col)) for col in pivot.columns}
-    pivot = pivot.rename(columns=new_cols)
-    pivot = pivot.T.groupby(level=0).sum().T
-
-    # Fecha visible
-    pivot = pivot.reset_index().rename(columns={"dia_mes": "Fecha"})
-    fecha_fmt = pivot["Fecha"].astype("Int64").astype(str)
-    if "mes_num" in dff.columns and dff["mes_num"].notna().any():
-        mes_por_dia = (dff.dropna(subset=["mes_num"]).groupby("dia_mes")["mes_num"]
-                       .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0]))
-        fecha_fmt = pivot["Fecha"].astype(int).map(lambda d: f"{d}/{MONTH_ABBR_ES.get(int(mes_por_dia.get(d, pd.NA)), '')}".rstrip("/"))
-    pivot["Fecha"] = fecha_fmt
-
-    # Orden de sedes
-    ordered_cols, extras = [], []
+# ============== Helpers de tabla (= muy ligeros, sin joins pesados) ==============
+def _order_sede_columns(cols):
+    ordered, extras = [], []
     for emp, mapping in SEDE_NAME_MAP.items():
         for _, nombre in mapping.items():
-            if nombre in pivot.columns: ordered_cols.append(nombre)
-    for c in pivot.columns:
-        if c not in ordered_cols + ["Fecha"]: extras.append(c)
-    sede_cols = ordered_cols + extras
+            if nombre in cols: ordered.append(nombre)
+    for c in cols:
+        if c not in ordered: extras.append(c)
+    return ordered + extras
 
-    # Totales
-    pivot = pivot[["Fecha"] + sede_cols].copy()
-    # aseguramos ints con nullable
+def _fecha_label_from_group(dias: pd.Series, mes_map: dict) -> pd.Series:
+    # dias es Int64; mes_map: dict dia->mes_num
+    out = dias.astype("Int64").astype(str)
+    if mes_map:
+        as_int = dias.astype("Int64").fillna(0).astype(int)
+        return as_int.map(lambda d: f"{d}/{MONTH_ABBR_ES.get(int(mes_map.get(d, 0)), '')}".rstrip("/"))
+    return out
+
+def build_table_from_agg(agg: pd.DataFrame, id_items_sel: list[str], metric: str) -> pd.DataFrame:
+    if not id_items_sel:
+        return pd.DataFrame()
+    sids = [str(x).strip() for x in id_items_sel]
+    dff = agg[agg["id_item"].isin(sids)]
+    if dff.empty:
+        return pd.DataFrame()
+
+    # detectar mes por día (modo)
+    m = (dff.dropna(subset=["mes_num"])
+            .groupby("dia_mes")["mes_num"]
+            .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0]))
+    # pivot liviano
+    pv = dff.pivot_table(index="dia_mes", columns="sede_name", values=metric, aggfunc="sum", fill_value=0)
+    all_days = sorted(dff["dia_mes"].dropna().unique())
+    pv = pv.reindex(all_days, fill_value=0)
+
+    # ordenar columnas de sede
+    sede_cols = _order_sede_columns([c for c in pv.columns])
+    pv = pv[sede_cols]
+
+    # Fecha visible
+    pv = pv.reset_index().rename(columns={"dia_mes":"Fecha"})
+    pv["Fecha"] = _fecha_label_from_group(pv["Fecha"], m.to_dict())
+
+    # Totales y fila de acumulado
     for c in sede_cols:
-        pivot[c] = pd.to_numeric(pivot[c], errors="coerce").fillna(0).round().astype("Int64")
-    pivot["T. Dia"] = pivot[sede_cols].sum(axis=1).astype("Int64")
+        pv[c] = pd.to_numeric(pv[c], errors="coerce").fillna(0).round().astype("Int64")
+    pv["T. Dia"] = pv[sede_cols].sum(axis=1).astype("Int64")
 
-    # Fila acumulado
-    acum_values = [int(pivot[c].sum()) for c in sede_cols]
-    acum_total  = int(pivot["T. Dia"].sum())
-    acum_row = pd.DataFrame([["Acum. Mes:"] + acum_values + [acum_total]],
-                            columns=["Fecha"] + sede_cols + ["T. Dia"])
-    # convertir la fila acumulado a Int64
+    acum_vals = [int(pv[c].sum()) for c in sede_cols]
+    acum_total = int(pv["T. Dia"].sum())
+    acum_row = pd.DataFrame([["Acum. Mes:"] + acum_vals + [acum_total]], columns=["Fecha"] + sede_cols + ["T. Dia"])
     for c in sede_cols + ["T. Dia"]:
         acum_row[c] = pd.to_numeric(acum_row[c], errors="coerce").astype("Int64")
 
-    final = pd.concat([pivot, acum_row], ignore_index=True)
-    return final.reset_index(drop=True)
+    final = pd.concat([pv, acum_row], ignore_index=True)
+    return final
 
 # ===================== UI =====================
 st.set_page_config(page_title="Ventas x Item – UR / UB (multi-item)", layout="wide")
@@ -307,25 +303,15 @@ if not uploaded:
     st.info("⬅️ Sube un archivo con columnas: empresa, fecha_dcto, id_co, id_item, und_dia (opcional: descripcion, ub_factor, ub_unit)")
     st.stop()
 
-# Leer archivo
-name = uploaded.name.lower()
+# Lectura y pre-agregado (cacheado por contenido de archivo)
+file_bytes = uploaded.getvalue()
 try:
-    if name.endswith(".csv"):
-        df_raw = pd.read_csv(uploaded)
-    else:
-        df_raw = pd.read_excel(uploaded)
-except Exception as e:
-    st.error(f"No pude leer el archivo: {e}")
-    st.stop()
-
-# Preprocesar
-try:
-    df = preprocess(df_raw)
+    df, agg = preprocess_cached(file_bytes, uploaded.name)
 except Exception as e:
     st.error(str(e))
     st.stop()
 
-# ====== Selector de ítems (1..10) ======
+# ===== Selector de ítems (1..10) =====
 if "descripcion" in df.columns:
     sum_por_item = df.groupby(["id_item","descripcion"], as_index=True)["und_dia"].sum().sort_values(ascending=False)
     opts = [(i, d) for (i, d) in sum_por_item.index]
@@ -345,70 +331,58 @@ if not id_items_sel:
     st.warning("Selecciona al menos un item (máximo 10).")
     st.stop()
 
-# ====== Estado inicial de metric / firmas de archivo y selección ======
-if "metric" not in st.session_state:
-    st.session_state.metric = "UR"
+# ===== Construir ambas tablas desde el agregado (rápido) =====
+tabla_UR = build_table_from_agg(agg, id_items_sel, "UR")
+tabla_UB = build_table_from_agg(agg, id_items_sel, "UB")
 
-file_sig = (uploaded.name, df.shape[0], df.shape[1])
-if st.session_state.get("last_file_sig") != file_sig:
-    # Nuevo archivo → invalida cache de selección
-    st.session_state.last_file_sig = file_sig
-    st.session_state.last_sel_key = None
-    st.session_state.tables_by_sel = {}
-
-sel_key = tuple(sorted(map(str, id_items_sel)))
-
-# ====== Precálculo UR/UB por selección (solo cuando cambia) ======
-if st.session_state.get("last_sel_key") != sel_key:
-    tabla_UR = build_table_multi(df, id_items_sel, metric="UR")
-    tabla_UB = build_table_multi(df, id_items_sel, metric="UB")
-    st.session_state.tables_by_sel = {"UR": tabla_UR, "UB": tabla_UB}
-    st.session_state.last_sel_key = sel_key
-
-# ====== Toggle UR / UB (no recalcula pivots) ======
-c1, c2 = st.columns([1,1])
-with c1:
-    if st.button("🔁 Cambiar vista (UR / UB)"):
-        st.session_state.metric = "UB" if st.session_state.metric == "UR" else "UR"
-with c2:
-    st.write("Vista actual:", f"**{st.session_state.metric}**")
-
-tabla_numeric = st.session_state.tables_by_sel.get(st.session_state.metric, pd.DataFrame())
-if tabla_numeric.empty:
-    st.error("No hay datos para los ítems seleccionados con la vista actual.")
+if tabla_UR.empty and tabla_UB.empty:
+    st.error("No hay datos para los ítems seleccionados.")
     st.stop()
 
-# ==== Render seguro para PyArrow: guiones SOLO en presentación ====
-def render_table(df_num: pd.DataFrame, show_dash: bool):
-    if not show_dash:
-        st.dataframe(df_num, width="stretch")
-        return
-    numeric_cols = [c for c in df_num.columns if c != "Fecha"]
-    def fmt_val(x):
-        if pd.isna(x): return "-"
-        try:
-            xi = int(x)
-            return "-" if xi == 0 else f"{xi:,}".replace(",", ".")
-        except:
-            return x
-    styler = df_num.style.format({c: fmt_val for c in numeric_cols})
-    st.dataframe(styler, width="stretch")
+# ===== Formateo vectorizado y column_config (sin Styler) =====
+def format_df_fast(df_in: pd.DataFrame, dash_zero: bool) -> pd.DataFrame:
+    df = df_in.copy()
+    num_cols = [c for c in df.columns if c != "Fecha"]
+    # miles con punto, y guion para cero
+    if dash_zero:
+        for c in num_cols:
+            s = pd.to_numeric(df[c], errors="coerce")
+            df[c] = np.where(s.fillna(0).astype(int) == 0, "-", s.map(lambda x: f"{int(x):,}".replace(",", ".")))
+    else:
+        for c in num_cols:
+            s = pd.to_numeric(df[c], errors="coerce")
+            df[c] = s.map(lambda x: f"{int(x):,}".replace(",", "."))  # 1.234
+    return df
 
-st.subheader(f"Tabla ({st.session_state.metric}) – items: {', '.join(map(str, id_items_sel))}")
-render_table(tabla_numeric, show_dash)
+df_UR_disp = format_df_fast(tabla_UR, show_dash) if not tabla_UR.empty else pd.DataFrame()
+df_UB_disp = format_df_fast(tabla_UB, show_dash) if not tabla_UB.empty else pd.DataFrame()
 
-# ====== Diagnóstico opcional ======
+# ===== Render simultáneo en tabs (switch instantáneo) =====
+tab1, tab2 = st.tabs(["🔹 UR", "🔸 UB"])
+
+with tab1:
+    if not df_UR_disp.empty:
+        st.subheader(f"Tabla (UR) – items: {', '.join(map(str, id_items_sel))}")
+        st.dataframe(df_UR_disp, width="stretch")
+    else:
+        st.info("Sin datos UR para la selección actual.")
+
+with tab2:
+    if not df_UB_disp.empty:
+        st.subheader(f"Tabla (UB) – items: {', '.join(map(str, id_items_sel))}")
+        st.dataframe(df_UB_disp, width="stretch")
+    else:
+        st.info("Sin datos UB para la selección actual.")
+
+# ===== Diagnóstico opcional =====
 if debug:
     with st.expander("🔎 Diagnóstico"):
-        dff_dbg = df[df["id_item"].isin(id_items_sel)].copy()
-        st.write("Días únicos:", sorted(dff_dbg["dia_mes"].dropna().unique()))
-        if "mes_num" in dff_dbg.columns:
-            st.write("Meses únicos (num):", sorted(pd.Series(dff_dbg["mes_num"]).dropna().unique()))
-        st.write("Sedes únicas:", sorted(dff_dbg["sede_key"].unique()))
-        st.write("Ejemplos UB (primeras 20 filas):")
-        st.dataframe(dff_dbg[["id_item","descripcion","und_dia","ub_factor_val","ub_unit_type","ub_unidades"]].head(20), width="stretch")
+        st.write("Agregado (primeras 20 filas):")
+        st.dataframe(agg.head(20), width="stretch")
+        st.write("Sedes únicas (agregado):", sorted(agg["sede_key"].unique()))
+        st.write("Días únicos:", sorted(agg["dia_mes"].dropna().unique()))
 
-# -------- Exportar a Excel (siempre datos numéricos, sin guiones) --------
+# -------- Exportar a Excel (elige UR o UB con radio, siempre datos numéricos) --------
 @st.cache_data(show_spinner=False)
 def to_excel_bytes(df_out: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
@@ -421,10 +395,12 @@ def to_excel_bytes(df_out: pd.DataFrame) -> bytes:
             ws.set_column(col_idx, col_idx, 12 if col != "Fecha" else 10, None if col=="Fecha" else fmt_int)
     return buf.getvalue()
 
-excel_bytes = to_excel_bytes(tabla_numeric)
+choice = st.radio("Descargar:", ["UR","UB"], horizontal=True)
+df_to_save = tabla_UR if choice=="UR" else tabla_UB
+excel_bytes = to_excel_bytes(df_to_save)
 st.download_button(
-    label=f"⬇️ Descargar Excel ({st.session_state.metric}).xlsx",
+    label=f"⬇️ Descargar Excel ({choice}).xlsx",
     data=excel_bytes,
-    file_name=f"tabla_ventas_items_{st.session_state.metric.lower()}.xlsx",
+    file_name=f"tabla_ventas_items_{choice.lower()}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )

@@ -35,10 +35,10 @@ except Exception as e:
     st.error(str(e))
     st.stop()
 
-# ========= Presets de fecha =========
+# ========= Presets de fecha (anclados a dtmax) =========
 def _set_range(days=None, this_month=False, prev_month=False):
     if "fecha_dt" in df and df["fecha_dt"].notna().any():
-        dtmax = df["fecha_dt"].max().date()
+        dtmax = df["fecha_dt"].max().date()  # último día con datos (en tu operación, ayer)
         if days is not None:
             st.session_state["_date_range"] = (dtmax - timedelta(days=days-1), dtmax)
         elif this_month:
@@ -51,7 +51,7 @@ def _set_range(days=None, this_month=False, prev_month=False):
             st.session_state["_date_range"] = (start_prev, last_prev)
 
 colp1, colp2, colp3, colp4 = st.columns(4)
-with colp1: st.button("Hoy", use_container_width=True, on_click=_set_range, kwargs={"days":1})
+with colp1: st.button("Ayer", use_container_width=True, on_click=_set_range, kwargs={"days":1})
 with colp2: st.button("7 días", use_container_width=True, on_click=_set_range, kwargs={"days":7})
 with colp3: st.button("Este mes", use_container_width=True, on_click=_set_range, kwargs={"this_month":True})
 with colp4: st.button("Mes anterior", use_container_width=True, on_click=_set_range, kwargs={"prev_month":True})
@@ -232,12 +232,10 @@ def to_excel_bytes_styled(df_out: pd.DataFrame, titulo_hoja: str = "reporte") ->
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-        # Dejamos una fila para escribir headers custom y luego los datos
         df.to_excel(writer, sheet_name=titulo_hoja, index=False, startrow=1)
         wb = writer.book
         ws = writer.sheets[titulo_hoja]
 
-        # === Formatos ===
         fmt_header = wb.add_format({"bold": True, "bg_color": "#F3F4F6", "border": 1})
         fmt_int    = wb.add_format({"num_format": "#,##0"})
         fmt_bold   = wb.add_format({"bold": True, "num_format": "#,##0"})
@@ -245,13 +243,11 @@ def to_excel_bytes_styled(df_out: pd.DataFrame, titulo_hoja: str = "reporte") ->
         fmt_red_b  = wb.add_format({"font_color": "red", "bold": True, "num_format": "#,##0"})
         fmt_text   = wb.add_format()
 
-        # === Encabezados (fila 1) ===
         for col_idx, col in enumerate(df.columns):
             ws.write(0, col_idx, col, fmt_header)
 
         n_rows, n_cols = df.shape
 
-        # === Pintado fila a fila ===
         for r in range(n_rows):
             fecha_val = df.iloc[r, 0]
             is_acum   = str(fecha_val) == "Acum. Mes:"
@@ -259,14 +255,14 @@ def to_excel_bytes_styled(df_out: pd.DataFrame, titulo_hoja: str = "reporte") ->
 
             for c_idx, col in enumerate(df.columns):
                 val = df.iloc[r, c_idx]
-                if c_idx == 0:  # Fecha (texto)
+                if c_idx == 0:
                     if is_acum:
                         ws.write(r + 1, c_idx, val, wb.add_format({"bold": True}))
                     elif is_dom:
                         ws.write(r + 1, c_idx, val, wb.add_format({"font_color": "red"}))
                     else:
                         ws.write(r + 1, c_idx, val, fmt_text)
-                else:  # números
+                else:
                     if pd.isna(val):
                         ws.write_blank(r + 1, c_idx, None)
                     else:
@@ -279,8 +275,7 @@ def to_excel_bytes_styled(df_out: pd.DataFrame, titulo_hoja: str = "reporte") ->
                         else:
                             ws.write(r + 1, c_idx, float(val), fmt_int)
 
-        # === Ajuste de anchos ===
-        ws.set_column(0, 0, 12)  # Fecha
+        ws.set_column(0, 0, 12)
         for c_idx in range(1, n_cols):
             col_name = str(df.columns[c_idx])
             sample_len = max(len(col_name), 10)

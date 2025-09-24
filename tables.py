@@ -99,6 +99,12 @@ def build_table_from_agg(agg: pd.DataFrame, id_items_sel: list[str], metric: str
         acum_row[c] = pd.to_numeric(acum_row[c], errors="coerce").astype("Int64")
 
     final = pd.concat([pv, acum_row], ignore_index=True)
+
+    # 🔒 Garantía: máxima 1 fila "Acum. Mes:"
+    dup_mask = final["Fecha"].astype(str).eq("Acum. Mes:")
+    if dup_mask.sum() > 1:
+        final = pd.concat([final[~dup_mask], final[dup_mask].tail(1)], ignore_index=True)
+
     return final.reset_index(drop=True)
 
 

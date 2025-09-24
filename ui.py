@@ -35,6 +35,7 @@ h1, h2, h3 {letter-spacing: .2px}
 .chip.on {background:#eaf1ff; border-color:#c7dbff; color:#2563eb;}
 .table-card {padding:.6rem .8rem; border:1px solid #eef2f7; border-radius:16px; background:#ffffff}
 .chart-card {padding:.6rem .8rem; border:1px solid #eef2f7; border-radius:16px; background:#ffffff}
+.dl-row {display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.4rem}
 .footer {text-align:center; color:#9ca3af; font-size:.85rem; margin-top:1.2rem}
 </style>
 """
@@ -92,11 +93,58 @@ def table_card(df: pd.DataFrame, title: str, styled=False):
     st.dataframe(df, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-def chart_card(title: str, chart_renderer):
-    """Contenedor visual para gráficos; chart_renderer es una función que dibuja el gráfico."""
+# ===== Descarga de gráficos (PNG/SVG) con vl-convert-python =====
+# Requiere: pip install vl-convert-python
+@st.cache_data(show_spinner=False)
+def _altair_to_image_bytes(chart_dict: dict, fmt: str = "png", scale: int = 2):
+    try:
+        import vl_convert as vlc
+        if fmt == "png":
+            return vlc.vegalite_to_png(chart_dict, scale=scale)
+        elif fmt == "svg":
+            svg_str = vlc.vegalite_to_svg(chart_dict)
+            return svg_str.encode("utf-8")
+    except Exception:
+        return None
+    return None
+
+def chart_card(title: str, chart, filename_base: str, data_df: pd.DataFrame | None = None, height: int | None = None):
+    """
+    Muestra un gráfico Altair y agrega botones para descargar:
+      - PNG (renderizado con vl-convert-python si está instalado)
+      - CSV de los datos usados en el gráfico (si se pasa data_df)
+    """
     st.markdown('<div class="chart-card">', unsafe_allow_html=True)
     st.subheader(title)
-    chart_renderer()
+    if height:
+        chart = chart.properties(height=height)
+    st.altair_chart(chart, use_container_width=True)
+
+    # Botones de descarga
+    col_a, col_b = st.columns([1,1])
+    with col_a:
+        chart_dict = chart.to_dict()
+        img_png = _altair_to_image_bytes(chart_dict, fmt="png", scale=2)
+        if img_png is not None:
+            st.download_button(
+                "⬇️ Descargar PNG",
+                data=img_png,
+                file_name=f"{filename_base}.png",
+                mime="image/png",
+                use_container_width=True
+            )
+        else:
+            st.caption("Para exportar PNG instala `vl-convert-python` en requirements.")
+    with col_b:
+        if data_df is not None and not data_df.empty:
+            csv = data_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "⬇️ Descargar CSV (datos del gráfico)",
+                data=csv,
+                file_name=f"{filename_base}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
     st.markdown('</div>', unsafe_allow_html=True)
 
 def footer_note():

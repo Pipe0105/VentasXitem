@@ -3,3 +3,9 @@ pandas>=2.2
 pyarrow>=16.0
 xlsxwriter>=3.2
 openpyxl>=3.1
+streamlit
+pandas
+numpy
+xlsxwriter
+altair
+vl-convert-python

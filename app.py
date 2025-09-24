@@ -5,6 +5,7 @@ Cambios clave:
 - Parseo de fecha explícito para evitar warnings de Pandas.
 - Nunca escribir '-' en columnas numéricas (se formatea en pantalla con Styler).
 - Streamlit: usar width='stretch' en st.dataframe.
+- ⚡ Precálculo y cache en sesión de tablas UR/UB por selección de ítems (toggle instantáneo).
 """
 
 import io
@@ -324,7 +325,7 @@ except Exception as e:
     st.error(str(e))
     st.stop()
 
-# Selector de ítems (1..10)
+# ====== Selector de ítems (1..10) ======
 if "descripcion" in df.columns:
     sum_por_item = df.groupby(["id_item","descripcion"], as_index=True)["und_dia"].sum().sort_values(ascending=False)
     opts = [(i, d) for (i, d) in sum_por_item.index]
@@ -344,10 +345,27 @@ if not id_items_sel:
     st.warning("Selecciona al menos un item (máximo 10).")
     st.stop()
 
-# Toggle UR / UB
+# ====== Estado inicial de metric / firmas de archivo y selección ======
 if "metric" not in st.session_state:
     st.session_state.metric = "UR"
 
+file_sig = (uploaded.name, df.shape[0], df.shape[1])
+if st.session_state.get("last_file_sig") != file_sig:
+    # Nuevo archivo → invalida cache de selección
+    st.session_state.last_file_sig = file_sig
+    st.session_state.last_sel_key = None
+    st.session_state.tables_by_sel = {}
+
+sel_key = tuple(sorted(map(str, id_items_sel)))
+
+# ====== Precálculo UR/UB por selección (solo cuando cambia) ======
+if st.session_state.get("last_sel_key") != sel_key:
+    tabla_UR = build_table_multi(df, id_items_sel, metric="UR")
+    tabla_UB = build_table_multi(df, id_items_sel, metric="UB")
+    st.session_state.tables_by_sel = {"UR": tabla_UR, "UB": tabla_UB}
+    st.session_state.last_sel_key = sel_key
+
+# ====== Toggle UR / UB (no recalcula pivots) ======
 c1, c2 = st.columns([1,1])
 with c1:
     if st.button("🔁 Cambiar vista (UR / UB)"):
@@ -355,8 +373,7 @@ with c1:
 with c2:
     st.write("Vista actual:", f"**{st.session_state.metric}**")
 
-# Construcción de tabla (NUMÉRICA, sin guiones)
-tabla_numeric = build_table_multi(df, id_items_sel, metric=st.session_state.metric)
+tabla_numeric = st.session_state.tables_by_sel.get(st.session_state.metric, pd.DataFrame())
 if tabla_numeric.empty:
     st.error("No hay datos para los ítems seleccionados con la vista actual.")
     st.stop()
@@ -380,7 +397,7 @@ def render_table(df_num: pd.DataFrame, show_dash: bool):
 st.subheader(f"Tabla ({st.session_state.metric}) – items: {', '.join(map(str, id_items_sel))}")
 render_table(tabla_numeric, show_dash)
 
-# Diagnóstico opcional
+# ====== Diagnóstico opcional ======
 if debug:
     with st.expander("🔎 Diagnóstico"):
         dff_dbg = df[df["id_item"].isin(id_items_sel)].copy()
@@ -392,6 +409,7 @@ if debug:
         st.dataframe(dff_dbg[["id_item","descripcion","und_dia","ub_factor_val","ub_unit_type","ub_unidades"]].head(20), width="stretch")
 
 # -------- Exportar a Excel (siempre datos numéricos, sin guiones) --------
+@st.cache_data(show_spinner=False)
 def to_excel_bytes(df_out: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:

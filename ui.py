@@ -2,21 +2,16 @@
 import streamlit as st
 import pandas as pd
 
-# ====== CSS global (colores y detalles visuales) ======
 APP_CSS = """
 <style>
-/* Layout y tipografía */
 .main .block-container {padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1400px;}
 h1, h2, h3 {letter-spacing: .2px}
-
-/* Top bar sticky */
 .app-topbar {
   position: sticky; top: 0; z-index: 10;
   display:flex; align-items:center; gap:.75rem; padding:.8rem 1.2rem;
   border:1px solid rgba(0,0,0,.08); border-radius:14px;
   background:linear-gradient(180deg,#ffffff .1%, #fdfdfd);
   box-shadow: 0 6px 14px rgba(0,0,0,.05);
-    margin-bottom:1.2rem;
 }
 .app-badge {
   font-weight:600; font-size:.85rem; color:#2563eb;
@@ -24,31 +19,21 @@ h1, h2, h3 {letter-spacing: .2px}
 }
 .app-title {font-weight:700; font-size:1.1rem; color:#111827;}
 .app-subtle {color:#6b7280; font-size:.9rem}
-
-/* Cards */
 .card {
   border:1px solid rgba(0,0,0,.06); border-radius:16px; background:#fff; padding:1rem;
   box-shadow: 0 6px 16px rgba(0,0,0,.05);
 }
-
-/* KPI */
 .kpi {text-align:left}
 .kpi .value {font-weight:700; font-size:1.6rem; line-height:1}
 .kpi .delta {color:#6b7280; font-size:.9rem; margin-top:.2rem}
 .kpi .label {color:#6b7280; font-size:.85rem}
-
-/* Chips (estado) */
 .chips {display:flex; gap:.5rem; flex-wrap:wrap; margin:.25rem 0}
 .chip {
   border:1px solid #e5e7eb; border-radius:999px; padding:.25rem .7rem; font-size:.85rem; cursor:default;
   background:#f9fafb; color:#374151;
 }
 .chip.on {background:#eaf1ff; border-color:#c7dbff; color:#2563eb;}
-
-/* Dataframe wrapper */
 .table-card {padding:.6rem .8rem; border:1px solid #eef2f7; border-radius:16px; background:#ffffff}
-
-/* Footer */
 .footer {text-align:center; color:#9ca3af; font-size:.85rem; margin-top:1.2rem}
 </style>
 """

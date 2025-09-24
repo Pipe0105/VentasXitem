@@ -1,6 +1,6 @@
 # app.py
 import io
-from datetime import date, timedelta
+from datetime import timedelta
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -51,9 +51,9 @@ def _set_range(days=None, this_month=False, prev_month=False):
             st.session_state["_date_range"] = (start_prev, last_prev)
 
 colp1, colp2, colp3, colp4 = st.columns(4)
-with colp1: st.button("Hoy",        use_container_width=True, on_click=_set_range, kwargs={"days":1})
-with colp2: st.button("7 días",     use_container_width=True, on_click=_set_range, kwargs={"days":7})
-with colp3: st.button("Este mes",   use_container_width=True, on_click=_set_range, kwargs={"this_month":True})
+with colp1: st.button("Hoy", use_container_width=True, on_click=_set_range, kwargs={"days":1})
+with colp2: st.button("7 días", use_container_width=True, on_click=_set_range, kwargs={"days":7})
+with colp3: st.button("Este mes", use_container_width=True, on_click=_set_range, kwargs={"this_month":True})
 with colp4: st.button("Mes anterior", use_container_width=True, on_click=_set_range, kwargs={"prev_month":True})
 
 # ========= Filtro de rango de fechas (si hay fecha completa) =========
@@ -61,7 +61,6 @@ if df["fecha_dt"].notna().any():
     min_date = df["fecha_dt"].min().date()
     max_date = df["fecha_dt"].max().date()
     value_range = st.session_state.get("_date_range", (min_date, max_date))
-    # Clamp a bordes reales
     vr0 = (max(min_date, value_range[0]), min(max_date, value_range[1]))
     rango = st.date_input("Rango de fechas", value=vr0, min_value=min_date, max_value=max_date)
     if isinstance(rango, tuple) and len(rango) == 2:
@@ -216,26 +215,87 @@ with tab2:
     else:
         table_card(pd.DataFrame({"Mensaje":["Sin datos UB para la selección actual."]}), "UB", styled=False)
 
-# ========= Descarga a Excel (sin estilos, datos limpios) =========
+# ========= Descarga a Excel (CON estilos) =========
 @st.cache_data(show_spinner=False)
-def to_excel_bytes(df_out: pd.DataFrame) -> bytes:
+def to_excel_bytes_styled(df_out: pd.DataFrame, titulo_hoja: str = "reporte") -> bytes:
+    """
+    Exporta la tabla con estilos:
+      - Fila 'Acum. Mes:' en negrita
+      - Filas de domingos (Fecha termina en '/Dom') en rojo (toda la fila)
+      - Números con formato #,##0
+    Mantiene los números como números (no cadenas) para que el Excel sea calculable.
+    """
+    df = df_out.copy()
+    num_cols = [c for c in df.columns if c != "Fecha"]
+    for c in num_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-        df_out.to_excel(writer, sheet_name="reporte", index=False)
+        # Dejamos una fila para escribir headers custom y luego los datos
+        df.to_excel(writer, sheet_name=titulo_hoja, index=False, startrow=1)
         wb = writer.book
-        ws = writer.sheets["reporte"]
-        fmt_int = wb.add_format({"num_format": "#,##0"})
-        for col_idx, col in enumerate(df_out.columns):
-            ws.set_column(col_idx, col_idx, 12 if col != "Fecha" else 10, None if col=="Fecha" else fmt_int)
+        ws = writer.sheets[titulo_hoja]
+
+        # === Formatos ===
+        fmt_header = wb.add_format({"bold": True, "bg_color": "#F3F4F6", "border": 1})
+        fmt_int    = wb.add_format({"num_format": "#,##0"})
+        fmt_bold   = wb.add_format({"bold": True, "num_format": "#,##0"})
+        fmt_red    = wb.add_format({"font_color": "red", "num_format": "#,##0"})
+        fmt_red_b  = wb.add_format({"font_color": "red", "bold": True, "num_format": "#,##0"})
+        fmt_text   = wb.add_format()
+
+        # === Encabezados (fila 1) ===
+        for col_idx, col in enumerate(df.columns):
+            ws.write(0, col_idx, col, fmt_header)
+
+        n_rows, n_cols = df.shape
+
+        # === Pintado fila a fila ===
+        for r in range(n_rows):
+            fecha_val = df.iloc[r, 0]
+            is_acum   = str(fecha_val) == "Acum. Mes:"
+            is_dom    = isinstance(fecha_val, str) and fecha_val.endswith("/Dom")
+
+            for c_idx, col in enumerate(df.columns):
+                val = df.iloc[r, c_idx]
+                if c_idx == 0:  # Fecha (texto)
+                    if is_acum:
+                        ws.write(r + 1, c_idx, val, wb.add_format({"bold": True}))
+                    elif is_dom:
+                        ws.write(r + 1, c_idx, val, wb.add_format({"font_color": "red"}))
+                    else:
+                        ws.write(r + 1, c_idx, val, fmt_text)
+                else:  # números
+                    if pd.isna(val):
+                        ws.write_blank(r + 1, c_idx, None)
+                    else:
+                        if is_acum and is_dom:
+                            ws.write(r + 1, c_idx, float(val), fmt_red_b)
+                        elif is_acum:
+                            ws.write(r + 1, c_idx, float(val), fmt_bold)
+                        elif is_dom:
+                            ws.write(r + 1, c_idx, float(val), fmt_red)
+                        else:
+                            ws.write(r + 1, c_idx, float(val), fmt_int)
+
+        # === Ajuste de anchos ===
+        ws.set_column(0, 0, 12)  # Fecha
+        for c_idx in range(1, n_cols):
+            col_name = str(df.columns[c_idx])
+            sample_len = max(len(col_name), 10)
+            ws.set_column(c_idx, c_idx, min(14, sample_len + 2))
+
     return buf.getvalue()
 
-choice = st.radio("Descargar:", ["UR","UB"], horizontal=True)
+choice = st.radio("Descargar:", ["UR", "UB"], horizontal=True)
 df_to_save = tabla_UR if choice == "UR" else tabla_UB
-excel_bytes = to_excel_bytes(df_to_save)
+excel_bytes = to_excel_bytes_styled(df_to_save, titulo_hoja=f"tabla_{choice}")
+
 st.download_button(
-    label=f"⬇️ Descargar Excel ({choice}).xlsx",
+    label=f"⬇️ Descargar Excel ({choice}) con estilos",
     data=excel_bytes,
-    file_name=f"tabla_ventas_items_{choice.lower()}.xlsx",
+    file_name=f"tabla_ventas_items_{choice.lower()}_styled.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 

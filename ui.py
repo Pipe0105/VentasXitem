@@ -4,8 +4,11 @@ import pandas as pd
 
 APP_CSS = """
 <style>
+/* Layout y tipografía */
 .main .block-container {padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1400px;}
 h1, h2, h3 {letter-spacing: .2px}
+
+/* Top bar sticky */
 .app-topbar {
   position: sticky; top: 0; z-index: 10;
   display:flex; align-items:center; gap:.75rem; padding:.8rem 1.2rem;
@@ -19,23 +22,36 @@ h1, h2, h3 {letter-spacing: .2px}
 }
 .app-title {font-weight:700; font-size:1.1rem; color:#111827;}
 .app-subtle {color:#6b7280; font-size:.9rem}
+
+/* Cards */
 .card {
   border:1px solid rgba(0,0,0,.06); border-radius:16px; background:#fff; padding:1rem;
   box-shadow: 0 6px 16px rgba(0,0,0,.05);
 }
+
+/* KPI */
 .kpi {text-align:left}
 .kpi .value {font-weight:700; font-size:1.6rem; line-height:1}
 .kpi .delta {color:#6b7280; font-size:.9rem; margin-top:.2rem}
 .kpi .label {color:#6b7280; font-size:.85rem}
+
+/* Chips (estado) */
 .chips {display:flex; gap:.5rem; flex-wrap:wrap; margin:.25rem 0}
 .chip {
   border:1px solid #e5e7eb; border-radius:999px; padding:.25rem .7rem; font-size:.85rem; cursor:default;
   background:#f9fafb; color:#374151;
 }
 .chip.on {background:#eaf1ff; border-color:#c7dbff; color:#2563eb;}
-.table-card {padding:.6rem .8rem; border:1px solid #eef2f7; border-radius:16px; background:#ffffff}
-.chart-card {padding:.6rem .8rem; border:1px solid #eef2f7; border-radius:16px; background:#ffffff}
-.dl-row {display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.4rem}
+
+/* Contenedores de tabla/gráfico */
+.table-card, .chart-card {padding:.6rem .8rem; border:1px solid #eef2f7; border-radius:16px; background:#ffffff}
+
+/* Botón de descarga compacto dentro de chart-card */
+.chart-card div[data-testid="stDownloadButton"] button {
+  padding: .25rem .65rem !important;
+  font-size: .85rem !important;
+  border-radius: 999px !important;
+}
 .footer {text-align:center; color:#9ca3af; font-size:.85rem; margin-top:1.2rem}
 </style>
 """
@@ -93,26 +109,11 @@ def table_card(df: pd.DataFrame, title: str, styled=False):
     st.dataframe(df, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ===== Descarga de gráficos (PNG/SVG) con vl-convert-python =====
-# Requiere: pip install vl-convert-python
-@st.cache_data(show_spinner=False)
-def _altair_to_image_bytes(chart_dict: dict, fmt: str = "png", scale: int = 2):
-    try:
-        import vl_convert as vlc
-        if fmt == "png":
-            return vlc.vegalite_to_png(chart_dict, scale=scale)
-        elif fmt == "svg":
-            svg_str = vlc.vegalite_to_svg(chart_dict)
-            return svg_str.encode("utf-8")
-    except Exception:
-        return None
-    return None
-
 def chart_card(title: str, chart, filename_base: str, data_df: pd.DataFrame | None = None, height: int | None = None):
     """
-    Muestra un gráfico Altair y agrega botones para descargar:
-      - PNG (renderizado con vl-convert-python si está instalado)
-      - CSV de los datos usados en el gráfico (si se pasa data_df)
+    Muestra un gráfico Altair y agrega botón para descargar:
+      - CSV con los datos usados en el gráfico (sin dependencias externas)
+    Nota: se elimina la exportación PNG para evitar fallos de vl-convert-python.
     """
     st.markdown('<div class="chart-card">', unsafe_allow_html=True)
     st.subheader(title)
@@ -120,31 +121,14 @@ def chart_card(title: str, chart, filename_base: str, data_df: pd.DataFrame | No
         chart = chart.properties(height=height)
     st.altair_chart(chart, use_container_width=True)
 
-    # Botones de descarga
-    col_a, col_b = st.columns([1,1])
-    with col_a:
-        chart_dict = chart.to_dict()
-        img_png = _altair_to_image_bytes(chart_dict, fmt="png", scale=2)
-        if img_png is not None:
-            st.download_button(
-                "⬇️ Descargar PNG",
-                data=img_png,
-                file_name=f"{filename_base}.png",
-                mime="image/png",
-                use_container_width=True
-            )
-        else:
-            st.caption("Para exportar PNG instala `vl-convert-python` en requirements.")
-    with col_b:
-        if data_df is not None and not data_df.empty:
-            csv = data_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "⬇️ Descargar CSV (datos del gráfico)",
-                data=csv,
-                file_name=f"{filename_base}.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+    if data_df is not None and not data_df.empty:
+        csv = data_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ CSV (datos del gráfico)",
+            data=csv,
+            file_name=f"{filename_base}.csv",
+            mime="text/csv"
+        )
     st.markdown('</div>', unsafe_allow_html=True)
 
 def footer_note():

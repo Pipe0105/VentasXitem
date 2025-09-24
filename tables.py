@@ -44,7 +44,7 @@ def build_table_from_agg(agg: pd.DataFrame, id_items_sel: list[str], metric: str
     if dff.empty:
         return pd.DataFrame()
 
-    # Mapa "día -> mes (moda)" (se mantiene por compatibilidad, no se usa en el label nuevo)
+    # Mapa "día -> mes (moda)" (se mantiene por compatibilidad)
     m = (
         dff.dropna(subset=["mes_num"])
            .groupby("dia_mes")["mes_num"]
@@ -103,7 +103,7 @@ def build_table_from_agg(agg: pd.DataFrame, id_items_sel: list[str], metric: str
 
 
 # =================== Estilos para Streamlit ===================
-def style_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+def style_table(df: pd.DataFrame):
     """
     Aplica estilos:
     - Fila de 'Acum. Mes:' → negrita

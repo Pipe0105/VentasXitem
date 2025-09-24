@@ -16,6 +16,7 @@ h1, h2, h3 {letter-spacing: .2px}
   border:1px solid rgba(0,0,0,.08); border-radius:14px;
   background:linear-gradient(180deg,#ffffff .1%, #fdfdfd);
   box-shadow: 0 6px 14px rgba(0,0,0,.05);
+    margin-bottom:1.2rem;
 }
 .app-badge {
   font-weight:600; font-size:.85rem; color:#2563eb;

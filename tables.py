@@ -44,7 +44,7 @@ def build_table_from_agg(agg: pd.DataFrame, id_items_sel: list[str], metric: str
     if dff.empty:
         return pd.DataFrame()
 
-    # Mapa "día -> mes (moda)" por si lo necesitas para otros labels (se mantiene)
+    # Mapa "día -> mes (moda)" (se mantiene por compatibilidad, no se usa en el label nuevo)
     m = (
         dff.dropna(subset=["mes_num"])
            .groupby("dia_mes")["mes_num"]
@@ -100,3 +100,20 @@ def build_table_from_agg(agg: pd.DataFrame, id_items_sel: list[str], metric: str
 
     final = pd.concat([pv, acum_row], ignore_index=True)
     return final.reset_index(drop=True)
+
+
+# =================== Estilos para Streamlit ===================
+def style_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+    """
+    Aplica estilos:
+    - Fila de 'Acum. Mes:' → negrita
+    - Filas de domingos (Fecha termina en '/Dom') → texto rojo
+    """
+    def highlight_rows(row):
+        if row["Fecha"] == "Acum. Mes:":
+            return ["font-weight: bold"] * len(row)
+        if isinstance(row["Fecha"], str) and row["Fecha"].endswith("/Dom"):
+            return ["color: red"] * len(row)
+        return [""] * len(row)
+
+    return df.style.apply(highlight_rows, axis=1)

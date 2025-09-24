@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from preprocess import preprocess_cached
-from tables import aggregate_for_tables, build_table_from_agg
+from tables import aggregate_for_tables, build_table_from_agg, style_table
 from titles import build_title_resumido
 from utils import format_df_fast
 
@@ -135,27 +135,27 @@ if tabla_UR.empty and tabla_UB.empty:
     st.error("No hay datos para los ítems seleccionados en el rango.")
     st.stop()
 
-# ========= Formateo visual rápido =========
+# ========= Formateo visual rápido (valores) =========
 df_UR_disp = format_df_fast(tabla_UR, show_dash) if not tabla_UR.empty else pd.DataFrame()
 df_UB_disp = format_df_fast(tabla_UB, show_dash) if not tabla_UB.empty else pd.DataFrame()
 
 # ========= Título resumido (inteligente) =========
 titulo_tabla = build_title_resumido(df_view, id_items_sel, top_groups=2)
 
-# ========= Render en tabs =========
+# ========= Render en tabs (con estilos) =========
 tab1, tab2 = st.tabs(["🔹 UR", "🔸 UB"])
 
 with tab1:
     if not df_UR_disp.empty:
         st.subheader(titulo_tabla)
-        st.dataframe(df_UR_disp, width="stretch")
+        st.dataframe(style_table(df_UR_disp), use_container_width=True)
     else:
         st.info("Sin datos UR para la selección actual.")
 
 with tab2:
     if not df_UB_disp.empty:
         st.subheader(titulo_tabla)
-        st.dataframe(df_UB_disp, width="stretch")
+        st.dataframe(style_table(df_UB_disp), use_container_width=True)
     else:
         st.info("Sin datos UB para la selección actual.")
 

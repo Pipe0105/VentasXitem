@@ -8,7 +8,6 @@ from preprocess import preprocess_cached
 from tables import aggregate_for_tables, build_table_from_agg
 from titles import build_title_resumido
 from utils import format_df_fast
-from constants import MONTH_ABBR_ES
 
 st.set_page_config(page_title="Ventas x Item – UR / UB (multi-item)", layout="wide")
 st.title("📊 Ventas por día y acumulados por sede (UR / UB)")
@@ -56,22 +55,70 @@ if df_view.empty:
     st.error("No hay datos en el rango de fechas seleccionado.")
     st.stop()
 
-# ========= Selector de ítems (1..10) =========
-if "descripcion" in df_view.columns:
-    sum_por_item = (df_view.groupby(["id_item","descripcion"], as_index=True)["und_dia"]
-                      .sum().sort_values(ascending=False))
-    opts = [(i, d) for (i, d) in sum_por_item.index]
+# ========= Selector de ítems (persistente, no se reinicia con el rango) =========
+
+# 1) Inicializa estado solo una vez
+if "item_selector" not in st.session_state:
+    st.session_state["item_selector"] = []
+
+# 2) Construye SIEMPRE las opciones desde el DF COMPLETO (df), no df_view
+if "descripcion" in df.columns:
+    sum_por_item_full = (df.groupby(["id_item","descripcion"], as_index=True)["und_dia"]
+                           .sum().sort_values(ascending=False))
+    all_opts = [(i, d) for (i, d) in sum_por_item_full.index]
+else:
+    sum_por_item_full = df.groupby("id_item", as_index=True)["und_dia"].sum().sort_values(ascending=False)
+    all_opts = list(sum_por_item_full.index)
+
+# 3) Info del RANGO ACTUAL para feedback (no para construir opciones)
+ur_rango = df_view.groupby("id_item")["und_dia"].sum() if not df_view.empty else pd.Series(dtype="int64")
+
+solo_con_datos = st.checkbox("Mostrar solo ítems con datos en el rango seleccionado", value=False)
+
+def _tiene_datos_en_rango(item_id: str) -> bool:
+    try:
+        return ur_rango.get(str(item_id), 0) > 0
+    except Exception:
+        return False
+
+# 4) Filtra opciones visibles si se pide (la selección guardada no se borra)
+if solo_con_datos:
+    if len(all_opts) and isinstance(all_opts[0], tuple):
+        visible_opts = [(i, d) for (i, d) in all_opts if _tiene_datos_en_rango(i)]
+    else:
+        visible_opts = [i for i in all_opts if _tiene_datos_en_rango(i)]
+else:
+    visible_opts = all_opts
+
+# 5) Formato que indica UR total y si tiene datos en el rango actual
+if len(all_opts) and isinstance(all_opts[0], tuple):
     def fmt(opt):
         i, desc = opt
-        return f"{i} - {desc}  (UR: {int(sum_por_item.loc[(i, desc)]):,})".replace(",", ".")
-    selected = st.multiselect("Items (selecciona 1 a 10)", opts, max_selections=10, format_func=fmt)
-    id_items_sel = [i for (i, _) in selected]
+        ur_full = int(sum_por_item_full.loc[(i, desc)])
+        ur_rng = int(ur_rango.get(str(i), 0))
+        badge = f"UR rango: {ur_rng:,}".replace(",", ".") if ur_rng > 0 else "sin datos en rango"
+        return f"{i} - {desc}  (UR total: {ur_full:,})  · {badge}".replace(",", ".")
 else:
-    sum_por_item = df_view.groupby("id_item", as_index=True)["und_dia"].sum().sort_values(ascending=False)
-    opts = list(sum_por_item.index)
     def fmt(i):
-        return f"{i}  (UR: {int(sum_por_item.loc[i]):,})".replace(",", ".")
-    id_items_sel = st.multiselect("Items (selecciona 1 a 10)", opts, max_selections=10, format_func=fmt)
+        ur_full = int(sum_por_item_full.loc[i]) if i in sum_por_item_full.index else 0
+        ur_rng = int(ur_rango.get(str(i), 0))
+        badge = f"UR rango: {ur_rng:,}".replace(",", ".") if ur_rng > 0 else "sin datos en rango"
+        return f"{i}  (UR total: {ur_full:,})  · {badge}".replace(",", ".")
+
+# 6) Multiselect con key fija → mantiene selección aunque cambie el rango
+selected = st.multiselect(
+    "Items (selecciona 1 a 10)",
+    options=visible_opts,
+    max_selections=10,
+    format_func=fmt,
+    key="item_selector"
+)
+
+# 7) Traduce la selección (que puede ser tupla o id) a lista de ids
+if len(all_opts) and isinstance(all_opts[0], tuple):
+    id_items_sel = [str(i) for (i, _d) in st.session_state["item_selector"]]
+else:
+    id_items_sel = [str(i) for i in st.session_state["item_selector"]]
 
 if not id_items_sel:
     st.warning("Selecciona al menos un item (máximo 10).")
@@ -139,7 +186,6 @@ st.download_button(
 if debug:
     with st.expander("🔎 Diagnóstico"):
         st.write("Fechas (min/max):", str(df["fecha_dt"].min()), "→", str(df["fecha_dt"].max()))
-        st.write("Agregado (primeras 20 filas):")
-        st.dataframe(agg.head(20), width="stretch")
         st.write("Días únicos en vista:", sorted(df_view["dia_mes"].dropna().unique()))
-        st.write("Ejemplo de filas:", df_view.head(10))
+        st.write("IDs seleccionados:", id_items_sel)
+        st.write("Muestra df_view:", df_view.head(10))

@@ -8,9 +8,12 @@ from preprocess import preprocess_cached
 from tables import aggregate_for_tables, build_table_from_agg, style_table
 from titles import build_title_resumido
 from utils import format_df_fast
+from ui import inject_css, topbar, kpi_row, chips_row, table_card, footer_note
 
+# ================= Page & Top UI =================
 st.set_page_config(page_title="Ventas x Item – UR / UB (multi-item)", layout="wide")
-st.title("📊 Ventas por día y acumulados por sede (UR / UB)")
+inject_css()
+topbar("Dashboard de UR / UB por sede", "Análisis diario con acumulados")
 
 # ================= Sidebar =================
 with st.sidebar:
@@ -56,12 +59,10 @@ if df_view.empty:
     st.stop()
 
 # ========= Selector de ítems (persistente, no se reinicia con el rango) =========
-
-# 1) Inicializa estado solo una vez
 if "item_selector" not in st.session_state:
     st.session_state["item_selector"] = []
 
-# 2) Construye SIEMPRE las opciones desde el DF COMPLETO (df), no df_view
+# Opciones SIEMPRE desde df (completo), no df_view
 if "descripcion" in df.columns:
     sum_por_item_full = (df.groupby(["id_item","descripcion"], as_index=True)["und_dia"]
                            .sum().sort_values(ascending=False))
@@ -70,9 +71,8 @@ else:
     sum_por_item_full = df.groupby("id_item", as_index=True)["und_dia"].sum().sort_values(ascending=False)
     all_opts = list(sum_por_item_full.index)
 
-# 3) Info del RANGO ACTUAL para feedback (no para construir opciones)
+# Feedback de datos en el rango actual (no cambia opciones)
 ur_rango = df_view.groupby("id_item")["und_dia"].sum() if not df_view.empty else pd.Series(dtype="int64")
-
 solo_con_datos = st.checkbox("Mostrar solo ítems con datos en el rango seleccionado", value=False)
 
 def _tiene_datos_en_rango(item_id: str) -> bool:
@@ -81,7 +81,7 @@ def _tiene_datos_en_rango(item_id: str) -> bool:
     except Exception:
         return False
 
-# 4) Filtra opciones visibles si se pide (la selección guardada no se borra)
+# Filtrado opcional de opciones visibles
 if solo_con_datos:
     if len(all_opts) and isinstance(all_opts[0], tuple):
         visible_opts = [(i, d) for (i, d) in all_opts if _tiene_datos_en_rango(i)]
@@ -90,7 +90,7 @@ if solo_con_datos:
 else:
     visible_opts = all_opts
 
-# 5) Formato que indica UR total y si tiene datos en el rango actual
+# Etiquetas del multiselect
 if len(all_opts) and isinstance(all_opts[0], tuple):
     def fmt(opt):
         i, desc = opt
@@ -105,8 +105,8 @@ else:
         badge = f"UR rango: {ur_rng:,}".replace(",", ".") if ur_rng > 0 else "sin datos en rango"
         return f"{i}  (UR total: {ur_full:,})  · {badge}".replace(",", ".")
 
-# 6) Multiselect con key fija → mantiene selección aunque cambie el rango
-selected = st.multiselect(
+# Multiselect con key fija (persiste)
+st.multiselect(
     "Items (selecciona 1 a 10)",
     options=visible_opts,
     max_selections=10,
@@ -114,7 +114,7 @@ selected = st.multiselect(
     key="item_selector"
 )
 
-# 7) Traduce la selección (que puede ser tupla o id) a lista de ids
+# IDs seleccionados
 if len(all_opts) and isinstance(all_opts[0], tuple):
     id_items_sel = [str(i) for (i, _d) in st.session_state["item_selector"]]
 else:
@@ -135,31 +135,50 @@ if tabla_UR.empty and tabla_UB.empty:
     st.error("No hay datos para los ítems seleccionados en el rango.")
     st.stop()
 
-# ========= Formateo visual rápido (valores) =========
+# ========= Formateo de valores para mostrar =========
 df_UR_disp = format_df_fast(tabla_UR, show_dash) if not tabla_UR.empty else pd.DataFrame()
 df_UB_disp = format_df_fast(tabla_UB, show_dash) if not tabla_UB.empty else pd.DataFrame()
 
 # ========= Título resumido (inteligente) =========
 titulo_tabla = build_title_resumido(df_view, id_items_sel, top_groups=2)
 
-# ========= Render en tabs (con estilos) =========
+# ========= KPIs y chips de estado =========
+# Totales sobre el rango filtrado y selección
+df_sel = df_view[df_view["id_item"].isin(id_items_sel)]
+ur_total = int(df_sel["und_dia"].sum())
+ub_total = int(df_sel["ub_unidades"].sum())
+# Sedes activas (según UR>0)
+agg_sel = agg[agg["id_item"].isin(id_items_sel)]
+sedes_activas = int((agg_sel.groupby("sede_key")["UR"].sum() > 0).sum())
+
+kpi_row(ur_total, ub_total, sedes_activas)
+
+# Texto de rango
+if df_view["fecha_dt"].notna().any():
+    r1 = df_view["fecha_dt"].min().strftime("%d/%b/%Y")
+    r2 = df_view["fecha_dt"].max().strftime("%d/%b/%Y")
+    rango_txt = f"{r1} – {r2}"
+else:
+    rango_txt = "Sin fecha completa"
+
+chips_row(items_count=len(id_items_sel), rango_texto=rango_txt, solo_con_datos=solo_con_datos)
+
+# ========= Render en tabs (con estilos dentro de tarjetas) =========
 tab1, tab2 = st.tabs(["🔹 UR", "🔸 UB"])
 
 with tab1:
     if not df_UR_disp.empty:
-        st.subheader(titulo_tabla)
-        st.dataframe(style_table(df_UR_disp), use_container_width=True)
+        table_card(style_table(df_UR_disp), titulo_tabla, styled=True)
     else:
-        st.info("Sin datos UR para la selección actual.")
+        table_card(pd.DataFrame({"Mensaje":["Sin datos UR para la selección actual."]}), "UR", styled=False)
 
 with tab2:
     if not df_UB_disp.empty:
-        st.subheader(titulo_tabla)
-        st.dataframe(style_table(df_UB_disp), use_container_width=True)
+        table_card(style_table(df_UB_disp), titulo_tabla, styled=True)
     else:
-        st.info("Sin datos UB para la selección actual.")
+        table_card(pd.DataFrame({"Mensaje":["Sin datos UB para la selección actual."]}), "UB", styled=False)
 
-# ========= Descarga a Excel =========
+# ========= Descarga a Excel (sin estilos, datos limpios) =========
 @st.cache_data(show_spinner=False)
 def to_excel_bytes(df_out: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
@@ -189,3 +208,7 @@ if debug:
         st.write("Días únicos en vista:", sorted(df_view["dia_mes"].dropna().unique()))
         st.write("IDs seleccionados:", id_items_sel)
         st.write("Muestra df_view:", df_view.head(10))
+        st.write("UR por ítem en rango:", ur_rango.head(15))
+
+# ========= Footer =========
+footer_note()

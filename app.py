@@ -1,13 +1,10 @@
 """
 App: Ventas x Item – UR/UB robusto por día x sede (multi-item hasta 10)
 
-Novedades:
-- Título resumido e “inteligente” sin listar 10 ítems: agrupa por nombre base (2 tokens).
-- Si todos pertenecen a un único grupo: muestra “(N variantes)”.
-- Si hay varios grupos: muestra top 2 representativos por UR y “y N más”.
-- Selección sigue siendo SOLO por ítems (sin filtros nuevos).
-- Pre-proceso y pre-agregado cacheados con @st.cache_data para rendimiento.
-- Render simultáneo en tabs (UR / UB).
+Novedades relevantes:
+- Filtro de rango de fechas (si el archivo trae fechas completas).
+- Título resumido inteligente (agrupa nombres parecidos; no lista 10 ítems).
+- Pre-agregado cacheado y render rápido (tabs UR/UB).
 """
 
 import io
@@ -61,10 +58,7 @@ def _clean_for_base(s: str) -> str:
     return s
 
 def make_base_name(desc: str, max_tokens: int = 2) -> str:
-    """
-    Devuelve un nombre 'base' corto (agresivo: 2 tokens) para agrupar variantes similares.
-    Ej: "Pan Seletti 500g x6" -> "Pan Seletti"
-    """
+    """Nombre 'base' corto (agresivo) para agrupar variantes similares (solo título)."""
     if not isinstance(desc, str) or not desc.strip():
         return ""
     txt = _clean_for_base(desc)
@@ -87,7 +81,7 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
 def unify_empresa(v: str) -> str:
     s = str(v).strip().lower()
     if s in ("metodo",): return "mtodo"
-    if s in ("bogota","bogota dc","bogota d.c."): return "bogota"
+    if s in ("bogota","bogotá","bogota dc","bogotá dc","bogota d.c.","bogotá d.c."): return "bogota"
     return s
 
 def sede_key_to_name(sede_key: str) -> str:
@@ -152,7 +146,7 @@ def extract_volume_ml(text: str):
     if m.group(1):
         l = _to_float(m.group(1));  return int(round(l * 1000)) if l is not None else None
     if m.group(3):
-        cl = _to_float(m.group(3)); return int(round(cl * 10)) if cl is not None else None
+        cl = _to_float(m.group(3)); return int(round(cl * 10)) if l is not None else None
     if m.group(5):
         ml = _to_float(m.group(5)); return int(round(ml)) if ml is not None else None
     return None
@@ -179,7 +173,7 @@ def normalize_ub_unit(unit: str) -> str:
     if u in {"l","lt","litro","litros","l."}: return "l"
     return "u"
 
-# ===================== Preproceso + agregado cacheados =====================
+# ===================== Preproceso cacheado (guarda fecha_dt) =====================
 @st.cache_data(show_spinner=False)
 def preprocess_cached(file_bytes: bytes, filename: str):
     # leer
@@ -198,10 +192,12 @@ def preprocess_cached(file_bytes: bytes, filename: str):
     # fechas
     parsed = parse_dates_strict(df["fecha_dcto"])
     if parsed.notna().any():
-        df["dia_mes"] = parsed.dt.day.astype("Int64")
-        df["mes_num"] = parsed.dt.month.astype("Int64")
-        df["anio"]    = parsed.dt.year.astype("Int64")
+        df["fecha_dt"] = parsed              # <-- fecha completa usable para filtro
+        df["dia_mes"]  = parsed.dt.day.astype("Int64")
+        df["mes_num"]  = parsed.dt.month.astype("Int64")
+        df["anio"]     = parsed.dt.year.astype("Int64")
     else:
+        df["fecha_dt"] = pd.NaT              # <-- no habrá filtro de fechas
         day = extract_day_if_possible(df["fecha_dcto"])
         if day.isna().all():
             raise ValueError("No pude interpretar 'fecha_dcto'. Usa fecha completa (ej. 24/09/2025) o día 1..31.")
@@ -218,7 +214,6 @@ def preprocess_cached(file_bytes: bytes, filename: str):
     df["id_item"] = df["id_item"].astype(str).str.strip()
     if "descripcion" in df.columns:
         df["descripcion"] = df["descripcion"].astype(str)
-        # calcular desc_base (2 tokens) para títulos
         df["desc_base"]   = df["descripcion"].map(make_base_name)
     else:
         df["desc_base"]   = ""
@@ -272,22 +267,23 @@ def preprocess_cached(file_bytes: bytes, filename: str):
     df["ub_unit_type"]  = ub_unit_type
     df["ub_unidades"]   = (df["und_dia"].astype("Float64") * pd.Series(ub_factor_val, index=df.index).astype("Float64")).round().astype("Int64")
 
-    # ------- PRE-AGREGADO (UR y UB) cacheable -------
-    agg = (df.groupby(["dia_mes","mes_num","anio","sede_key","id_item"], as_index=False)
-             .agg(UR=("und_dia","sum"), UB=("ub_unidades","sum")))
-    agg["sede_name"] = agg["sede_key"].map(lambda k: sede_key_to_name(str(k)))
+    return df  # ← devolvemos solo el DF; el agregado se hará post-filtro
 
-    return df, agg
+# ===================== Agregado (UR/UB) sobre un DataFrame ya filtrado =====================
+def aggregate_for_tables(df_in: pd.DataFrame) -> pd.DataFrame:
+    agg = (df_in.groupby(["dia_mes","mes_num","anio","sede_key","id_item"], as_index=False)
+              .agg(UR=("und_dia","sum"), UB=("ub_unidades","sum")))
+    agg["sede_name"] = agg["sede_key"].map(lambda k: sede_key_to_name(str(k)))
+    return agg
 
 # ============== Helpers tabla ==============
 def _order_sede_columns(cols):
-    ordered, extras = [], []
+    expected = []
     for emp, mapping in SEDE_NAME_MAP.items():
         for _, nombre in mapping.items():
-            if nombre in cols: ordered.append(nombre)
-    for c in cols:
-        if c not in ordered: extras.append(c)
-    return ordered + extras
+            expected.append(nombre)
+    extras = [c for c in cols if c not in expected]
+    return expected + extras
 
 def _fecha_label_from_group(dias: pd.Series, mes_map: dict) -> pd.Series:
     out = dias.astype("Int64").astype(str)
@@ -304,67 +300,59 @@ def build_table_from_agg(agg: pd.DataFrame, id_items_sel: list[str], metric: str
     if dff.empty:
         return pd.DataFrame()
 
-    # detectar mes por día (modo)
+    # moda de mes por día
     m = (dff.dropna(subset=["mes_num"])
             .groupby("dia_mes")["mes_num"]
             .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0]))
-    # pivot liviano
+
     pv = dff.pivot_table(index="dia_mes", columns="sede_name", values=metric, aggfunc="sum", fill_value=0)
     all_days = sorted(dff["dia_mes"].dropna().unique())
     pv = pv.reindex(all_days, fill_value=0)
 
-    # ordenar columnas de sede
-    sede_cols = _order_sede_columns([c for c in pv.columns])
-    pv = pv[sede_cols]
+    # columnas esperadas (todas las sedes del mapa) + extras
+    full_cols = _order_sede_columns(list(pv.columns))
+    for c in full_cols:
+        if c not in pv.columns:
+            pv[c] = 0
+    pv = pv[full_cols]
 
-    # Fecha visible
     pv = pv.reset_index().rename(columns={"dia_mes":"Fecha"})
     pv["Fecha"] = _fecha_label_from_group(pv["Fecha"], m.to_dict())
 
-    # Totales y fila de acumulado
+    sede_cols = [c for c in pv.columns if c != "Fecha"]
     for c in sede_cols:
         pv[c] = pd.to_numeric(pv[c], errors="coerce").fillna(0).round().astype("Int64")
     pv["T. Dia"] = pv[sede_cols].sum(axis=1).astype("Int64")
 
-    acum_vals = [int(pv[c].sum()) for c in sede_cols]
-    acum_total = int(pv["T. Dia"].sum())
-    acum_row = pd.DataFrame([["Acum. Mes:"] + acum_vals + [acum_total]], columns=["Fecha"] + sede_cols + ["T. Dia"])
+    acum_values = [int(pv[c].sum()) for c in sede_cols]
+    acum_total  = int(pv["T. Dia"].sum())
+    acum_row = pd.DataFrame([["Acum. Mes:"] + acum_values + [acum_total]], columns=["Fecha"] + sede_cols + ["T. Dia"])
     for c in sede_cols + ["T. Dia"]:
         acum_row[c] = pd.to_numeric(acum_row[c], errors="coerce").astype("Int64")
 
     final = pd.concat([pv, acum_row], ignore_index=True)
-    return final
+    return final.reset_index(drop=True)
 
-# ============== Título resumido por “nombre base” (2 tokens) ==============
+# ============== Título resumido (inteligente) ==============
 def build_title_resumido(df: pd.DataFrame, id_items_sel: list[str], top_groups: int = 2) -> str:
-    """
-    - ÚNICO grupo base: “Mes Año – Vta por día y acumulada de “Base (N variantes)”” si N>1
-    - VARIOS grupos:    “Mes Año – Vta por día y acumulada de k ítems (Base1, Base2 y X más)”
-      Bases ordenadas por mayor UR total dentro de la selección.
-    """
     if not id_items_sel:
         return "Vta por día y acumulada"
 
     ss = df[df["id_item"].astype(str).isin(map(str, id_items_sel))].copy()
-
-    # Mes/Año por moda
     mes = int(ss["mes_num"].mode().iloc[0]) if "mes_num" in ss and ss["mes_num"].notna().any() else None
     anio = int(ss["anio"].mode().iloc[0]) if "anio" in ss and ss["anio"].notna().any() else None
     mes_txt  = MONTH_FULL_ES.get(mes, "") if mes else ""
     anio_txt = str(anio) if anio else ""
 
-    # Si no hay descripciones, caer a conteo
     if "descripcion" not in df.columns or ss["descripcion"].isna().all():
         n = len(id_items_sel)
         return f"{mes_txt} {anio_txt} – Vta por día y acumulada de {n} ítems".strip()
 
-    # Asegurar base: si no existe en DF (debería), calcular al vuelo
     if "desc_base" not in ss.columns or ss["desc_base"].isna().all():
         ss["desc_base"] = ss["descripcion"].map(lambda x: make_base_name(x, max_tokens=2))
 
-    # Variantes por base (n° de id_item distintos) y UR total para ordenar
-    variantes_por_base = (ss.groupby("desc_base")["id_item"].nunique().rename("variantes"))
-    ur_por_base = (ss.groupby("desc_base")["und_dia"].sum().rename("UR_total")).sort_values(ascending=False)
+    variantes_por_base = ss.groupby("desc_base")["id_item"].nunique().rename("variantes")
+    ur_por_base = ss.groupby("desc_base")["und_dia"].sum().rename("UR_total").sort_values(ascending=False)
     resumen = (pd.concat([variantes_por_base, ur_por_base], axis=1)
                  .sort_values("UR_total", ascending=False)
                  .reset_index())
@@ -382,7 +370,6 @@ def build_title_resumido(df: pd.DataFrame, id_items_sel: list[str], top_groups: 
         suf = "" if n_var <= 1 else f" ({n_var} variantes)"
         return f'{mes_txt} {anio_txt} – Vta por día y acumulada de “{base}{suf}”'.strip()
 
-    # Varios grupos: top N bases representativas
     top = resumen.head(top_groups)["desc_base"].tolist()
     if len(top) == 1:
         listado = top[0]
@@ -409,17 +396,36 @@ if not uploaded:
     st.info("⬅️ Sube un archivo con columnas: empresa, fecha_dcto, id_co, id_item, und_dia (opcional: descripcion, ub_factor, ub_unit)")
     st.stop()
 
-# Lectura y pre-agregado (cacheado por contenido de archivo)
+# Lectura y preproceso (cacheado)
 file_bytes = uploaded.getvalue()
 try:
-    df, agg = preprocess_cached(file_bytes, uploaded.name)
+    df = preprocess_cached(file_bytes, uploaded.name)
 except Exception as e:
     st.error(str(e))
     st.stop()
 
+# ===== Filtro de fechas (si hay fecha completa) =====
+if df["fecha_dt"].notna().any():
+    min_date = df["fecha_dt"].min().date()
+    max_date = df["fecha_dt"].max().date()
+    rango = st.date_input("Rango de fechas", value=(min_date, max_date), min_value=min_date, max_value=max_date)
+    if isinstance(rango, tuple) and len(rango) == 2:
+        d1, d2 = rango
+        mask = (df["fecha_dt"].dt.date >= d1) & (df["fecha_dt"].dt.date <= d2)
+        df_view = df[mask].copy()
+    else:
+        df_view = df.copy()
+else:
+    st.info("📅 El archivo no trae fecha completa; el filtro de fechas no está disponible.")
+    df_view = df.copy()
+
+if df_view.empty:
+    st.error("No hay datos en el rango de fechas seleccionado.")
+    st.stop()
+
 # ===== Selector de ítems (1..10) =====
-if "descripcion" in df.columns:
-    sum_por_item = (df.groupby(["id_item","descripcion"], as_index=True)["und_dia"]
+if "descripcion" in df_view.columns:
+    sum_por_item = (df_view.groupby(["id_item","descripcion"], as_index=True)["und_dia"]
                       .sum().sort_values(ascending=False))
     opts = [(i, d) for (i, d) in sum_por_item.index]
     def fmt(opt):
@@ -428,7 +434,7 @@ if "descripcion" in df.columns:
     selected = st.multiselect("Items (selecciona 1 a 10)", opts, max_selections=10, format_func=fmt)
     id_items_sel = [i for (i, _) in selected]
 else:
-    sum_por_item = df.groupby("id_item", as_index=True)["und_dia"].sum().sort_values(ascending=False)
+    sum_por_item = df_view.groupby("id_item", as_index=True)["und_dia"].sum().sort_values(ascending=False)
     opts = list(sum_por_item.index)
     def fmt(i):
         return f"{i}  (UR: {int(sum_por_item.loc[i]):,})".replace(",", ".")
@@ -438,12 +444,15 @@ if not id_items_sel:
     st.warning("Selecciona al menos un item (máximo 10).")
     st.stop()
 
-# ===== Construir tablas desde el agregado (rápido) =====
+# ===== Agregado para el rango filtrado =====
+agg = aggregate_for_tables(df_view)
+
+# ===== Construcción de tablas =====
 tabla_UR = build_table_from_agg(agg, id_items_sel, "UR")
 tabla_UB = build_table_from_agg(agg, id_items_sel, "UB")
 
 if tabla_UR.empty and tabla_UB.empty:
-    st.error("No hay datos para los ítems seleccionados.")
+    st.error("No hay datos para los ítems seleccionados en el rango.")
     st.stop()
 
 # ===== Formateo vectorizado (sin Styler) =====
@@ -463,8 +472,8 @@ def format_df_fast(df_in: pd.DataFrame, dash_zero: bool) -> pd.DataFrame:
 df_UR_disp = format_df_fast(tabla_UR, show_dash) if not tabla_UR.empty else pd.DataFrame()
 df_UB_disp = format_df_fast(tabla_UB, show_dash) if not tabla_UB.empty else pd.DataFrame()
 
-# ===== Título resumido =====
-titulo_tabla = build_title_resumido(df, id_items_sel, top_groups=2)
+# ===== Título resumido (inteligente) =====
+titulo_tabla = build_title_resumido(df_view, id_items_sel, top_groups=2)
 
 # ===== Render simultáneo en tabs =====
 tab1, tab2 = st.tabs(["🔹 UR", "🔸 UB"])
@@ -486,12 +495,13 @@ with tab2:
 # ===== Diagnóstico opcional =====
 if debug:
     with st.expander("🔎 Diagnóstico"):
+        st.write("Fechas (min/max):", str(df["fecha_dt"].min()), "→", str(df["fecha_dt"].max()))
         st.write("Agregado (primeras 20 filas):")
         st.dataframe(agg.head(20), width="stretch")
-        st.write("Sedes únicas (agregado):", sorted(agg["sede_key"].unique()))
-        st.write("Días únicos:", sorted(agg["dia_mes"].dropna().unique()))
-        if "descripcion" in df.columns:
-            st.write("Ejemplos desc_base (2 tokens):", df[["descripcion","desc_base"]].head(20))
+        st.write("Sedes únicas (agg):", sorted(agg["sede_key"].unique()))
+        st.write("Días únicos:", sorted(df_view["dia_mes"].dropna().unique()))
+        if "descripcion" in df_view.columns:
+            st.write("Ejemplos desc_base:", df_view[["descripcion","desc_base"]].head(20))
 
 # -------- Exportar a Excel (elige UR o UB) --------
 @st.cache_data(show_spinner=False)

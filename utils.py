@@ -35,6 +35,7 @@ def parse_dates_strict(series: pd.Series) -> pd.Series:
     """
     Intenta parsear fechas con formatos comunes.
     Usa el primero que logre interpretar al menos 80% de los valores.
+    Evita warnings de pandas al no depender de la inferencia automática.
     """
     s = series.astype(str).str.strip()
     formats = ["%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y", "%Y/%m/%d"]
@@ -45,6 +46,7 @@ def parse_dates_strict(series: pd.Series) -> pd.Series:
                 return dt
         except Exception:
             continue
+    # fallback si hay mezcla rara de formatos
     return pd.to_datetime(s, dayfirst=True, errors="coerce")
 
 def extract_day_if_possible(series: pd.Series) -> pd.Series:

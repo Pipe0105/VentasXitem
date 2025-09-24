@@ -1,15 +1,17 @@
 # app.py
 import io
 from datetime import timedelta
+import numpy as pd_np_guard  # placeholder to show numpy import line next
 import numpy as np
 import pandas as pd
 import streamlit as st
+import altair as alt
 
 from preprocess import preprocess_cached
 from tables import aggregate_for_tables, build_table_from_agg, style_table
 from titles import build_title_resumido
 from utils import format_df_fast
-from ui import inject_css, topbar, kpi_row, chips_row, table_card, footer_note
+from ui import inject_css, topbar, kpi_row, chips_row, table_card, chart_card, footer_note
 
 # ================= Page & Top UI =================
 st.set_page_config(page_title="Ventas x Item – UR / UB (multi-item)", layout="wide")
@@ -200,9 +202,10 @@ else:
 
 chips_row(items_count=len(id_items_sel), rango_texto=rango_txt, solo_con_datos=solo_con_datos)
 
-# ========= Render en tabs (con estilos dentro de tarjetas) =========
-tab1, tab2 = st.tabs(["🔹 UR", "🔸 UB"])
+# ========= Render en tabs (tablas + nuevos gráficos) =========
+tab1, tab2, tab3, tab4 = st.tabs(["🔹 UR (tabla)", "🔸 UB (tabla)", "📈 Día pico", "🏆 Top ítems"])
 
+# ---------- Tabs de tablas ----------
 with tab1:
     if not df_UR_disp.empty:
         table_card(style_table(df_UR_disp), titulo_tabla, styled=True)
@@ -215,44 +218,135 @@ with tab2:
     else:
         table_card(pd.DataFrame({"Mensaje":["Sin datos UB para la selección actual."]}), "UB", styled=False)
 
+# ---------- 📈 Día pico ----------
+with tab3:
+    metric_choice = st.radio("Métrica", ["UR", "UB"], horizontal=True, key="metric_pico")
+    modo = st.radio("Ver:", ["Agregado selección", "Por ítem"], horizontal=True, key="modo_pico")
+    # Preparar serie diaria
+    df_metric = df_sel.copy()
+    df_metric["dia"] = df_metric["fecha_dt"].dt.date
+    val_col = "und_dia" if metric_choice == "UR" else "ub_unidades"
+
+    if modo == "Agregado selección":
+        serie = df_metric.groupby("dia", as_index=False)[val_col].sum().rename(columns={val_col: "valor"})
+        if not serie.empty:
+            idx_max = serie["valor"].idxmax()
+            dia_max, val_max = serie.loc[idx_max, "dia"], int(serie.loc[idx_max, "valor"])
+        else:
+            dia_max, val_max = None, 0
+
+        def _render_chart():
+            if serie.empty:
+                st.info("Sin datos para graficar en el rango/selección.")
+                return
+            base = alt.Chart(serie).mark_bar().encode(
+                x=alt.X("dia:T", title="Día"),
+                y=alt.Y("valor:Q", title=f"{metric_choice}"),
+                tooltip=[alt.Tooltip("dia:T", title="Día"), alt.Tooltip("valor:Q", title=metric_choice, format=",.0f")]
+            )
+            rule = alt.Chart(pd.DataFrame({"dia": [dia_max]})).mark_rule(color="red").encode(x="dia:T") if dia_max else None
+            text = alt.Chart(pd.DataFrame({"dia":[dia_max], "txt":[f"Pico: {val_max:,}"]})).mark_text(
+                dy=-10
+            ).encode(x="dia:T", text="txt:N") if dia_max else None
+            chart = base if rule is None else base + rule + (text if text is not None else rule)
+            st.altair_chart(chart.properties(height=320), use_container_width=True)
+
+        chart_card(f"Día pico – {metric_choice} (agregado selección)", _render_chart)
+
+    else:  # Por ítem
+        # Agrupa por día e ítem
+        if "descripcion" in df_metric.columns:
+            label_map = (df_metric.groupby(["id_item","descripcion"])["und_dia"].sum()
+                                   .sort_values(ascending=False)).index.get_level_values(1).to_series()
+        else:
+            label_map = None
+
+        serie = (df_metric.groupby(["dia","id_item"], as_index=False)[val_col].sum()
+                          .rename(columns={val_col: "valor"}))
+        def _render_chart():
+            if serie.empty:
+                st.info("Sin datos para graficar en el rango/selección.")
+                return
+            # Etiqueta de ítem: usa descripción si existe
+            serie_plot = serie.copy()
+            if label_map is not None:
+                # obtenemos 1 desc por id_item (puede no cubrir todos)
+                id_to_desc = df_metric.groupby("id_item")["descripcion"].agg(lambda s: s.dropna().iloc[0] if not s.dropna().empty else s.iloc[0])
+                serie_plot["Item"] = serie_plot["id_item"].map(id_to_desc).fillna(serie_plot["id_item"])
+            else:
+                serie_plot["Item"] = serie_plot["id_item"]
+
+            chart = alt.Chart(serie_plot).mark_line(point=True).encode(
+                x=alt.X("dia:T", title="Día"),
+                y=alt.Y("valor:Q", title=f"{metric_choice}"),
+                color=alt.Color("Item:N", title="Ítem"),
+                tooltip=[alt.Tooltip("Item:N"), alt.Tooltip("dia:T", title="Día"), alt.Tooltip("valor:Q", title=metric_choice, format=",.0f")]
+            ).properties(height=350)
+            st.altair_chart(chart, use_container_width=True)
+
+        chart_card(f"Evolución diaria por ítem – {metric_choice}", _render_chart)
+
+# ---------- 🏆 Top ítems ----------
+with tab4:
+    metric_choice_top = st.radio("Métrica", ["UR", "UB"], horizontal=True, key="metric_top")
+    scope = st.radio("Ámbito", ["Todo el rango (todos los ítems)", "Solo ítems seleccionados"], horizontal=True, key="scope_top")
+    top_n = st.slider("Top N", min_value=5, max_value=50, value=10, step=5)
+
+    if scope == "Solo ítems seleccionados":
+        dft = df_sel.copy()
+    else:
+        dft = df_view.copy()
+
+    val_col = "und_dia" if metric_choice_top == "UR" else "ub_unidades"
+    if "descripcion" in dft.columns:
+        top_df = (dft.groupby(["id_item","descripcion"], as_index=False)[val_col]
+                    .sum().rename(columns={val_col:"valor"})
+                    .sort_values("valor", ascending=False).head(top_n))
+        top_df["Item"] = top_df["descripcion"].where(top_df["descripcion"].astype(str).str.strip() != "", top_df["id_item"])
+    else:
+        top_df = (dft.groupby(["id_item"], as_index=False)[val_col]
+                    .sum().rename(columns={val_col:"valor"})
+                    .sort_values("valor", ascending=False).head(top_n))
+        top_df["Item"] = top_df["id_item"]
+
+    def _render_top():
+        if top_df.empty:
+            st.info("Sin datos para armar el ranking en el rango seleccionado.")
+            return
+        chart = alt.Chart(top_df).mark_bar().encode(
+            x=alt.X("valor:Q", title=metric_choice_top),
+            y=alt.Y("Item:N", sort="-x", title="Ítem"),
+            tooltip=[alt.Tooltip("Item:N"), alt.Tooltip("valor:Q", title=metric_choice_top, format=",.0f")]
+        ).properties(height=max(250, 24 * len(top_df)))
+        st.altair_chart(chart, use_container_width=True)
+
+    chart_card(f"Top {top_n} ítems – {metric_choice_top}", _render_top)
+
 # ========= Descarga a Excel (CON estilos) =========
 @st.cache_data(show_spinner=False)
 def to_excel_bytes_styled(df_out: pd.DataFrame, titulo_hoja: str = "reporte") -> bytes:
-    """
-    Exporta la tabla con estilos:
-      - Fila 'Acum. Mes:' en negrita
-      - Filas de domingos (Fecha termina en '/Dom') en rojo (toda la fila)
-      - Números con formato #,##0
-    Mantiene los números como números (no cadenas) para que el Excel sea calculable.
-    """
     df = df_out.copy()
     num_cols = [c for c in df.columns if c != "Fecha"]
     for c in num_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         df.to_excel(writer, sheet_name=titulo_hoja, index=False, startrow=1)
         wb = writer.book
         ws = writer.sheets[titulo_hoja]
-
         fmt_header = wb.add_format({"bold": True, "bg_color": "#F3F4F6", "border": 1})
         fmt_int    = wb.add_format({"num_format": "#,##0"})
         fmt_bold   = wb.add_format({"bold": True, "num_format": "#,##0"})
         fmt_red    = wb.add_format({"font_color": "red", "num_format": "#,##0"})
         fmt_red_b  = wb.add_format({"font_color": "red", "bold": True, "num_format": "#,##0"})
         fmt_text   = wb.add_format()
-
         for col_idx, col in enumerate(df.columns):
             ws.write(0, col_idx, col, fmt_header)
-
         n_rows, n_cols = df.shape
-
         for r in range(n_rows):
             fecha_val = df.iloc[r, 0]
             is_acum   = str(fecha_val) == "Acum. Mes:"
             is_dom    = isinstance(fecha_val, str) and fecha_val.endswith("/Dom")
-
             for c_idx, col in enumerate(df.columns):
                 val = df.iloc[r, c_idx]
                 if c_idx == 0:
@@ -274,19 +368,16 @@ def to_excel_bytes_styled(df_out: pd.DataFrame, titulo_hoja: str = "reporte") ->
                             ws.write(r + 1, c_idx, float(val), fmt_red)
                         else:
                             ws.write(r + 1, c_idx, float(val), fmt_int)
-
         ws.set_column(0, 0, 12)
         for c_idx in range(1, n_cols):
             col_name = str(df.columns[c_idx])
             sample_len = max(len(col_name), 10)
             ws.set_column(c_idx, c_idx, min(14, sample_len + 2))
-
     return buf.getvalue()
 
 choice = st.radio("Descargar:", ["UR", "UB"], horizontal=True)
 df_to_save = tabla_UR if choice == "UR" else tabla_UB
 excel_bytes = to_excel_bytes_styled(df_to_save, titulo_hoja=f"tabla_{choice}")
-
 st.download_button(
     label=f"⬇️ Descargar Excel ({choice}) con estilos",
     data=excel_bytes,

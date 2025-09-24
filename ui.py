@@ -12,7 +12,6 @@ h1, h2, h3 {letter-spacing: .2px}
   border:1px solid rgba(0,0,0,.08); border-radius:14px;
   background:linear-gradient(180deg,#ffffff .1%, #fdfdfd);
   box-shadow: 0 6px 14px rgba(0,0,0,.05);
-  margin-bottom:1.2rem;
 }
 .app-badge {
   font-weight:600; font-size:.85rem; color:#2563eb;
@@ -35,6 +34,7 @@ h1, h2, h3 {letter-spacing: .2px}
 }
 .chip.on {background:#eaf1ff; border-color:#c7dbff; color:#2563eb;}
 .table-card {padding:.6rem .8rem; border:1px solid #eef2f7; border-radius:16px; background:#ffffff}
+.chart-card {padding:.6rem .8rem; border:1px solid #eef2f7; border-radius:16px; background:#ffffff}
 .footer {text-align:center; color:#9ca3af; font-size:.85rem; margin-top:1.2rem}
 </style>
 """
@@ -90,6 +90,13 @@ def table_card(df: pd.DataFrame, title: str, styled=False):
     st.markdown('<div class="table-card">', unsafe_allow_html=True)
     st.subheader(title)
     st.dataframe(df, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def chart_card(title: str, chart_renderer):
+    """Contenedor visual para gráficos; chart_renderer es una función que dibuja el gráfico."""
+    st.markdown('<div class="chart-card">', unsafe_allow_html=True)
+    st.subheader(title)
+    chart_renderer()
     st.markdown('</div>', unsafe_allow_html=True)
 
 def footer_note():

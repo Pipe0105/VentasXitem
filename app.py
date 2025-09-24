@@ -1,12 +1,12 @@
 """
 App: Ventas x Item – UR/UB robusto por día x sede (multi-item hasta 10)
 
-Mejoras de performance para cambio instantáneo UR/UB:
+Mejoras:
 - Pre-proceso y pre-agregado cacheados con @st.cache_data.
-- Agregado único (UR/UB) a nivel (dia_mes, mes_num, sede_key, id_item).
+- Agregado único (UR/UB) a nivel (dia_mes, mes_num, anio, sede_key, id_item).
 - Construcción de tabla desde agregado (filtrar + pivot) ultra liviana.
-- Render simultáneo en tabs (UR y UB) para cambio instantáneo (sin recomputar).
-- Sin Styler (que es lento); formateo vectorizado y column_config.
+- Render simultáneo en tabs (UR y UB).
+- Título: "Mes Año – Vta por día y acumulada de “Nombre del item”" (mes completo).
 """
 
 import io
@@ -22,6 +22,7 @@ SEDE_NAME_MAP = {
     "bogota": {"1": "Calle 80","2": "Chía"},
 }
 MONTH_ABBR_ES = {1:"Ene",2:"Feb",3:"Mar",4:"Abr",5:"May",6:"Jun",7:"Jul",8:"Ago",9:"Sep",10:"Oct",11:"Nov",12:"Dic"}
+MONTH_FULL_ES = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",7:"Julio",8:"Agosto",9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
 
 # ===================== Aliases =====================
 ALIASES = {
@@ -160,12 +161,14 @@ def preprocess_cached(file_bytes: bytes, filename: str):
     if parsed.notna().any():
         df["dia_mes"] = parsed.dt.day.astype("Int64")
         df["mes_num"] = parsed.dt.month.astype("Int64")
+        df["anio"]    = parsed.dt.year.astype("Int64")     # <-- año
     else:
         day = extract_day_if_possible(df["fecha_dcto"])
         if day.isna().all():
             raise ValueError("No pude interpretar 'fecha_dcto'. Usa fecha completa (ej. 24/09/2025) o día 1..31.")
         df["dia_mes"] = day
         df["mes_num"] = pd.Series([pd.NA]*len(df), dtype="Int64")
+        df["anio"]    = pd.Series([pd.NA]*len(df), dtype="Int64")
 
     df["empresa"] = df["empresa"].map(unify_empresa)
     idco_num = pd.to_numeric(df["id_co"], errors="coerce")
@@ -224,15 +227,13 @@ def preprocess_cached(file_bytes: bytes, filename: str):
     df["ub_unidades"]   = (df["und_dia"].astype("Float64") * pd.Series(ub_factor_val, index=df.index).astype("Float64")).round().astype("Int64")
 
     # ------- PRE-AGREGADO (UR y UB) cacheable -------
-    agg = (df.groupby(["dia_mes","mes_num","sede_key","id_item"], as_index=False)
+    agg = (df.groupby(["dia_mes","mes_num","anio","sede_key","id_item"], as_index=False)
              .agg(UR=("und_dia","sum"), UB=("ub_unidades","sum")))
-
-    # nombre sede visible fijo en el agregado
     agg["sede_name"] = agg["sede_key"].map(lambda k: sede_key_to_name(str(k)))
 
     return df, agg
 
-# ============== Helpers de tabla (= muy ligeros, sin joins pesados) ==============
+# ============== Helpers de tabla (= muy ligeros) ==============
 def _order_sede_columns(cols):
     ordered, extras = [], []
     for emp, mapping in SEDE_NAME_MAP.items():
@@ -243,7 +244,6 @@ def _order_sede_columns(cols):
     return ordered + extras
 
 def _fecha_label_from_group(dias: pd.Series, mes_map: dict) -> pd.Series:
-    # dias es Int64; mes_map: dict dia->mes_num
     out = dias.astype("Int64").astype(str)
     if mes_map:
         as_int = dias.astype("Int64").fillna(0).astype(int)
@@ -288,6 +288,32 @@ def build_table_from_agg(agg: pd.DataFrame, id_items_sel: list[str], metric: str
 
     final = pd.concat([pv, acum_row], ignore_index=True)
     return final
+
+# ============== Título Mes Año + Nombre Item ==============
+def build_title(df: pd.DataFrame, id_items_sel: list[str]) -> str:
+    subset = df[df["id_item"].isin(id_items_sel)].copy()
+    mes_modo = int(subset["mes_num"].mode().iloc[0]) if subset["mes_num"].notna().any() else None
+    anio_modo = int(subset["anio"].mode().iloc[0]) if "anio" in subset.columns and subset["anio"].notna().any() else None
+    mes_txt = MONTH_FULL_ES.get(mes_modo, "") if mes_modo else ""
+    anio_txt = str(anio_modo) if anio_modo else ""
+
+    # Nombre del item (si hay columna descripción)
+    if "descripcion" in df.columns and len(id_items_sel) == 1:
+        item_id = str(id_items_sel[0])
+        descs = subset.loc[subset["id_item"] == item_id, "descripcion"].dropna()
+        nombre_item = descs.mode().iloc[0] if not descs.mode().empty else item_id
+    elif "descripcion" in df.columns and len(id_items_sel) > 1:
+        top_desc = (subset.dropna(subset=["descripcion"])
+                    .groupby("id_item")["descripcion"]
+                    .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0])
+                    .reset_index())
+        nombres = [f'{r["descripcion"]}' for _, r in top_desc.head(3).iterrows()]
+        nombre_item = ", ".join(nombres) + ("…" if len(top_desc) > 3 else "")
+    else:
+        nombre_item = ", ".join(map(str, id_items_sel))
+
+    titulo = f'{mes_txt} {anio_txt} – Vta por día y acumulada de “{nombre_item}”'.strip()
+    return titulo
 
 # ===================== UI =====================
 st.set_page_config(page_title="Ventas x Item – UR / UB (multi-item)", layout="wide")
@@ -339,37 +365,39 @@ if tabla_UR.empty and tabla_UB.empty:
     st.error("No hay datos para los ítems seleccionados.")
     st.stop()
 
-# ===== Formateo vectorizado y column_config (sin Styler) =====
+# ===== Formateo vectorizado (sin Styler) =====
 def format_df_fast(df_in: pd.DataFrame, dash_zero: bool) -> pd.DataFrame:
-    df = df_in.copy()
-    num_cols = [c for c in df.columns if c != "Fecha"]
-    # miles con punto, y guion para cero
+    dfv = df_in.copy()
+    num_cols = [c for c in dfv.columns if c != "Fecha"]
     if dash_zero:
         for c in num_cols:
-            s = pd.to_numeric(df[c], errors="coerce")
-            df[c] = np.where(s.fillna(0).astype(int) == 0, "-", s.map(lambda x: f"{int(x):,}".replace(",", ".")))
+            s = pd.to_numeric(dfv[c], errors="coerce")
+            dfv[c] = np.where(s.fillna(0).astype(int) == 0, "-", s.map(lambda x: f"{int(x):,}".replace(",", ".")))
     else:
         for c in num_cols:
-            s = pd.to_numeric(df[c], errors="coerce")
-            df[c] = s.map(lambda x: f"{int(x):,}".replace(",", "."))  # 1.234
-    return df
+            s = pd.to_numeric(dfv[c], errors="coerce")
+            dfv[c] = s.map(lambda x: f"{int(x):,}".replace(",", "."))
+    return dfv
 
 df_UR_disp = format_df_fast(tabla_UR, show_dash) if not tabla_UR.empty else pd.DataFrame()
 df_UB_disp = format_df_fast(tabla_UB, show_dash) if not tabla_UB.empty else pd.DataFrame()
+
+# ===== Título bonito (mes completo + nombre item) =====
+titulo_tabla = build_title(df, id_items_sel)
 
 # ===== Render simultáneo en tabs (switch instantáneo) =====
 tab1, tab2 = st.tabs(["🔹 UR", "🔸 UB"])
 
 with tab1:
     if not df_UR_disp.empty:
-        st.subheader(f"Tabla (UR) – items: {', '.join(map(str, id_items_sel))}")
+        st.subheader(titulo_tabla)
         st.dataframe(df_UR_disp, width="stretch")
     else:
         st.info("Sin datos UR para la selección actual.")
 
 with tab2:
     if not df_UB_disp.empty:
-        st.subheader(f"Tabla (UB) – items: {', '.join(map(str, id_items_sel))}")
+        st.subheader(titulo_tabla)
         st.dataframe(df_UB_disp, width="stretch")
     else:
         st.info("Sin datos UB para la selección actual.")
@@ -382,7 +410,7 @@ if debug:
         st.write("Sedes únicas (agregado):", sorted(agg["sede_key"].unique()))
         st.write("Días únicos:", sorted(agg["dia_mes"].dropna().unique()))
 
-# -------- Exportar a Excel (elige UR o UB con radio, siempre datos numéricos) --------
+# -------- Exportar a Excel (elige UR o UB con radio) --------
 @st.cache_data(show_spinner=False)
 def to_excel_bytes(df_out: pd.DataFrame) -> bytes:
     buf = io.BytesIO()

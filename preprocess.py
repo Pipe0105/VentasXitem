@@ -33,30 +33,17 @@ def _normalize_text(s: str) -> str:
 # Regex de presentación
 # =========================
 
-# Conteo con número: "x12" / "*12" / "12 und|unid|uds"
 COUNT_RE = re.compile(
     r"(?:\b|^)(?:x|\*)\s*(\d{1,4})\b"
     r"|(?:\b|^)(\d{1,4})\s*(?:u|un|und|uds|unid|unids|unidades)\b",
     re.IGNORECASE,
 )
-
-# SIN número explícito → x1: "*und", "x und", "* unid", etc. (con o sin espacio)
-STAR_UND_RE = re.compile(
-    r"(?:\*|x)\s*(?:u|un|und|uds|unid|unids|unidades)\b",
-    re.IGNORECASE,
-)
+STAR_UND_RE = re.compile(r"(?:\*|x)\s*(?:u|un|und|uds|unid|unids|unidades)\b", re.IGNORECASE)
 
 def extract_count_multiplier(text: str) -> int | None:
-    """
-    Factor de unidades por presentación:
-      - "x12", "*12", "12 und/unid/uds" → 12
-      - "*und", "x und", "* unid", etc. → 1
-      - si no hay patrón → None (luego asumimos 1)
-    """
     if not isinstance(text, str) or not text.strip():
         return None
     t = _normalize_text(text)
-
     m = COUNT_RE.search(t)
     if m:
         for g in (m.group(1), m.group(2)):
@@ -66,10 +53,8 @@ def extract_count_multiplier(text: str) -> int | None:
                     return n if 1 <= n <= 5000 else None
                 except Exception:
                     pass
-
     if STAR_UND_RE.search(t):
         return 1
-
     return None
 
 # =========================
@@ -88,12 +73,6 @@ def _build_sede_key(row: pd.Series) -> str:
     return f"{emp}|{co}"
 
 def _compute_ub_row(row) -> int:
-    """
-    UB = und_dia * factor_detectado
-    - factor_detectado es:
-        * extract_count_multiplier(desc) si existe
-        * 1 si no se detecta nada
-    """
     und = float(row.get("und_dia") or 0)
     mult = row.get("count_mult")
     if mult is None or mult <= 0:
@@ -121,7 +100,7 @@ def _preprocess_core(df: pd.DataFrame) -> pd.DataFrame:
             df["id_item"] = "S/A"
     df["id_item"] = df["id_item"].astype(str)
 
-    # descripcion (original)
+    # descripcion
     if "descripcion" not in df.columns:
         for c in df.columns:
             if "desc" in str(c).lower():
@@ -156,7 +135,7 @@ def _preprocess_core(df: pd.DataFrame) -> pd.DataFrame:
 
     # ===== Factor de presentación para UB =====
     desc = df["descripcion"].fillna("").astype(str)
-    df["count_mult"] = desc.apply(extract_count_multiplier)  # xN o *UND→1 (None → 1 en el cómputo)
+    df["count_mult"] = desc.apply(extract_count_multiplier)
 
     # ===== UB ===== → Int64 (nullable)
     df["ub_unidades"] = df.apply(_compute_ub_row, axis=1).astype("Int64")

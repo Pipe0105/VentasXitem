@@ -49,7 +49,7 @@ except Exception as e:
 # ========= Presets de fecha (anclados a dtmax) =========
 def _set_range(days=None, this_month=False, prev_month=False):
     if "fecha_dt" in df and df["fecha_dt"].notna().any():
-        dtmax = df["fecha_dt"].max().date()  # último día con datos
+        dtmax = df["fecha_dt"].max().date()
         if days is not None:
             st.session_state["_date_range"] = (dtmax - timedelta(days=days-1), dtmax)
         elif this_month:

@@ -1,233 +1,164 @@
+# preprocess.py
 import io
-import re
-import unicodedata
+import numpy as np
 import pandas as pd
+import re
 import streamlit as st
 
 from utils import (
-    standardize_columns,
-    unify_empresa,
-    parse_dates_strict,
-    parse_und_dia_series,
+    standardize_columns, unify_empresa, sede_key_to_name,
+    parse_dates_strict, extract_day_if_possible, parse_und_dia_series,
+    make_base_name
 )
 
-# =========================
-# Normalización de texto
-# =========================
+# Parsers de UB (peso/volumen/conteo) para calcular UB por fila
+NUM = r"(\d+(?:[.,]\d+)?)"
+WEIGHT_RE = re.compile(rf"{NUM}\s*(kg|kilo|kilogramo|kilogramos|kg\.)|{NUM}\s*(g|gr|gramo|gramos|g\.)", re.IGNORECASE)
+VOL_RE    = re.compile(rf"{NUM}\s*(l|lt|litro|litros|l\.)|{NUM}\s*(cl|centilitro|centilitros)|{NUM}\s*(ml|mililitro|mililitros)", re.IGNORECASE)
+COUNT_RE  = re.compile(r"(?:x\s*(\d{1,5}))|(?:\b(\d{1,5})\s*(?:u|un|und|uds|unid|unids|unidades|huevos?)\b)", re.IGNORECASE)
 
-_MULT_SIGNS = {
-    "×": "x", "✕": "x", "✖": "x", "✗": "x",
-    "∙": "x", "·": "x", "•": "x", "∗": "*", "⁎": "*", "٭": "*",
-}
-
-def _normalize_text(s: str) -> str:
-    if not isinstance(s, str):
-        s = "" if s is None else str(s)
-    s = unicodedata.normalize("NFKC", s)
-    for k, v in _MULT_SIGNS.items():
-        s = s.replace(k, v)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-# =========================
-# Regex de presentación
-# =========================
-
-# Peso
-GRAM_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:g|gr|gramos?)\b", re.IGNORECASE)
-KG_RE   = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:kg|kilo?s?)\b", re.IGNORECASE)
-
-# Volumen
-ML_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:ml|mililitros?)\b", re.IGNORECASE)
-L_RE  = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:l|lt|litros?)\b", re.IGNORECASE)
-
-# Conteo con número: "x12" / "*12" / "12 und|unid|uds"
-COUNT_RE = re.compile(
-    r"(?:\b|^)(?:x|\*)\s*(\d{1,4})\b"
-    r"|(?:\b|^)(\d{1,4})\s*(?:u|un|und|uds|unid|unids|unidades)\b",
-    re.IGNORECASE,
-)
-
-# SIN número explícito → x1: "*und", "x und", "* unid", etc.
-STAR_UND_RE = re.compile(
-    r"(?:\*|x)\s*(?:u|un|und|uds|unid|unids|unidades)\b",
-    re.IGNORECASE,
-)
-
-def _to_float(x: str) -> float | None:
+def _to_float(x):
     try:
-        return float(str(x).replace(".", "").replace(",", "."))
+        return float(str(x).replace(",", "."))
     except Exception:
         return None
 
-def extract_weight_unit(text: str) -> float | None:
-    if not isinstance(text, str): return None
-    t = _normalize_text(text)
-    m = GRAM_RE.search(t)
-    if m:
-        v = _to_float(m.group(1))
-        return v if v and v > 0 else None
-    m = KG_RE.search(t)
-    if m:
-        v = _to_float(m.group(1))
-        return v * 1000 if v and v > 0 else None
-    return None
-
-def extract_volume_unit(text: str) -> float | None:
-    if not isinstance(text, str): return None
-    t = _normalize_text(text)
-    m = ML_RE.search(t)
-    if m:
-        v = _to_float(m.group(1))
-        return v if v and v > 0 else None
-    m = L_RE.search(t)
-    if m:
-        v = _to_float(m.group(1))
-        return v * 1000 if v and v > 0 else None
-    return None
-
-def extract_count_units(text: str) -> int | None:
-    """
-    Multiplicador de unidades:
-      - "x12", "*12", "12 und/unid/uds" → 12
-      - "*und", "x und", "* unid", etc. → 1
-    """
+def extract_weight_grams(text: str):
     if not isinstance(text, str) or not text.strip():
         return None
-    t = _normalize_text(text)
-
-    m = COUNT_RE.search(t)
-    if m:
-        for g in (m.group(1), m.group(2)):
-            if g:
-                try:
-                    n = int(g)
-                    return n if 1 <= n <= 5000 else None
-                except Exception:
-                    pass
-
-    if STAR_UND_RE.search(t):
-        return 1
+    m = WEIGHT_RE.search(text)
+    if not m:
+        return None
+    if m.group(1):
+        kg = _to_float(m.group(1))
+        return int(round(kg * 1000)) if kg is not None else None
+    if m.group(3):
+        g = _to_float(m.group(3))
+        return int(round(g)) if g is not None else None
     return None
 
-# =========================
-# Cálculo de claves/UB
-# =========================
+def extract_volume_ml(text: str):
+    if not isinstance(text, str) or not text.strip():
+        return None
+    m = VOL_RE.search(text)
+    if not m:
+        return None
+    if m.group(1):
+        l = _to_float(m.group(1))
+        return int(round(l * 1000)) if l is not None else None
+    if m.group(3):
+        cl = _to_float(m.group(3))
+        return int(round(cl * 10)) if cl is not None else None
+    if m.group(5):
+        ml = _to_float(m.group(5))
+        return int(round(ml)) if ml is not None else None
+    return None
 
-def _build_sede_key(row: pd.Series) -> str:
-    emp = unify_empresa(row.get("empresa", ""))
-    co = str(row.get("id_co", "")).strip()
-    if not co:
-        co = str(row.get("sede", "") or row.get("sede_cod", "")).strip()
-    if not emp:
-        emp = "na"
-    if not co:
-        co = "NA"
-    return f"{emp}|{co}"
+def extract_count_units(text: str):
+    if not isinstance(text, str) or not text.strip():
+        return None
+    m = COUNT_RE.search(text)
+    if not m:
+        return None
+    for g in (m.group(1), m.group(2)):
+        if g:
+            try:
+                n = int(g)
+                return n if 1 <= n <= 5000 else None
+            except Exception:
+                continue
+    return None
 
-def _compute_ub_row(row) -> int:
-    und_dia = float(row.get("und_dia") or 0)
-
-    # 1) Peso (gramos por unidad)
-    if row.get("peso_u"):
-        g = float(row["peso_u"])
-        return int(round(und_dia / g)) if g > 0 and und_dia > 0 else 0
-
-    # 2) Volumen (ml por unidad)
-    if row.get("vol_u"):
-        ml = float(row["vol_u"])
-        return int(round(und_dia / ml)) if ml > 0 and und_dia > 0 else 0
-
-    # 3) Conteo (incluye "*UND"/"x und" → 1)
-    if row.get("count_u"):
-        return int(row["count_u"])
-
-    # 4) Fallback
-    return int(und_dia)
-
-# =========================
-# Preproceso core + caché
-# =========================
-
-def _preprocess_core(df: pd.DataFrame) -> pd.DataFrame:
-    df = standardize_columns(df)
-
-    # fecha_dt
-    fecha_src = df.get("fecha_dcto", df.get("fecha", df.get("fecha_dt", None)))
-    df["fecha_dt"] = parse_dates_strict(fecha_src) if fecha_src is not None else pd.NaT
-
-    # id_item
-    if "id_item" not in df.columns:
-        for c in df.columns:
-            if "item" in str(c).lower():
-                df["id_item"] = df[c]
-                break
-        else:
-            df["id_item"] = "S/A"
-    df["id_item"] = df["id_item"].astype(str)
-
-    # descripcion (guardamos original; normalizamos solo para parseo)
-    if "descripcion" not in df.columns:
-        for c in df.columns:
-            if "desc" in str(c).lower():
-                df["descripcion"] = df[c]
-                break
-        else:
-            df["descripcion"] = ""
-    df["descripcion"] = df["descripcion"].fillna("").astype(str)
-
-    # und_dia (UR)
-    if "und_dia" in df.columns:
-        df["und_dia"] = parse_und_dia_series(df["und_dia"]).fillna(0).astype(int)
-    else:
-        candidate = None
-        for c in df.columns:
-            if any(k in str(c).lower() for k in ("und", "ur", "cantidad", "cant")):
-                candidate = c
-                break
-        df["und_dia"] = parse_und_dia_series(df.get(candidate, pd.Series(dtype="object"))).fillna(0).astype(int)
-
-    # empresa / id_co → sede_key
-    if "empresa" not in df.columns:
-        df["empresa"] = ""
-    if "id_co" not in df.columns:
-        if "sede" in df.columns:
-            df["id_co"] = df["sede"]
-        elif "sede_cod" in df.columns:
-            df["id_co"] = df["sede_cod"]
-        else:
-            df["id_co"] = ""
-    df["sede_key"] = df.apply(_build_sede_key, axis=1)
-
-    # Señales desde descripción
-    desc = df["descripcion"].fillna("").astype(str)
-    df["peso_u"]  = desc.apply(extract_weight_unit)   # en gramos
-    df["vol_u"]   = desc.apply(extract_volume_unit)   # en ml
-    df["count_u"] = desc.apply(extract_count_units)   # xN o *UND → 1
-
-    # UB
-    df["ub_unidades"] = df.apply(_compute_ub_row, axis=1).astype(int)
-
-    # ===== Campos que pide tables.py en el groupby =====
-    df["dia_mes"] = df["fecha_dt"].dt.day
-    df["mes_num"] = df["fecha_dt"].dt.month
-    df["anio"]    = df["fecha_dt"].dt.year
-    df["dow_idx"] = df["fecha_dt"].dt.weekday
-
-    return df
-
-
+# --------- CACHE principal: lee/normaliza todo y deja df listo ---------
 @st.cache_data(show_spinner=False)
 def preprocess_cached(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    """
-    Lee CSV/XLSX, normaliza y devuelve columnas:
-      fecha_dt, id_item, descripcion, empresa, id_co, sede_key,
-      und_dia, ub_unidades, dia_mes, mes_num, anio, dow_idx
-    """
-    name = (filename or "").lower()
-    bio = io.BytesIO(file_bytes)
-    if name.endswith(".csv"):
-        df_raw = pd.read_csv(bio, dtype=str)
+    # Leer archivo
+    if filename.lower().endswith(".csv"):
+        df_raw = pd.read_csv(io.BytesIO(file_bytes))
     else:
-        df_raw = pd.read_excel(bio, dtype=str)
-    return _preprocess_core(df_raw)
+        df_raw = pd.read_excel(io.BytesIO(file_bytes))
+
+    # Normalizar columnas
+    df = standardize_columns(df_raw)
+
+    required = {"empresa", "fecha_dcto", "id_co", "id_item", "und_dia"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Faltan columnas requeridas (después de normalizar): {missing}")
+
+    # Fechas
+    parsed = parse_dates_strict(df["fecha_dcto"])
+    if parsed.notna().any():
+        df["fecha_dt"] = parsed
+        df["dia_mes"]  = parsed.dt.day.astype("Int64")
+        df["mes_num"]  = parsed.dt.month.astype("Int64")
+        df["anio"]     = parsed.dt.year.astype("Int64")
+    else:
+        df["fecha_dt"] = pd.NaT
+        day = extract_day_if_possible(df["fecha_dcto"])
+        if day.isna().all():
+            raise ValueError("No pude interpretar 'fecha_dcto'. Usa fecha completa (ej. 24/09/2025) o día 1..31.")
+        df["dia_mes"] = day
+        df["mes_num"] = pd.Series([pd.NA]*len(df), dtype="Int64")
+        df["anio"]    = pd.Series([pd.NA]*len(df), dtype="Int64")
+
+    # Normalizaciones clave
+    df["empresa"] = df["empresa"].map(unify_empresa)
+    idco_num = pd.to_numeric(df["id_co"], errors="coerce")
+    df["id_co"] = (idco_num.round().astype("Int64").astype(str)
+                   if idco_num.notna().any() else df["id_co"].astype(str))
+    df["sede_key"] = df["empresa"].astype(str).str.lower().str.strip() + "|" + df["id_co"].astype(str).str.strip()
+    df["id_item"] = df["id_item"].astype(str).str.strip()
+
+    if "descripcion" in df.columns:
+        df["descripcion"] = df["descripcion"].astype(str)
+        df["desc_base"]   = df["descripcion"].map(make_base_name)
+    else:
+        df["desc_base"]   = ""
+
+    # UR
+    df["und_dia"] = parse_und_dia_series(df["und_dia"])
+
+    # UB
+    if "ub_factor" in df.columns:
+        ef = pd.to_numeric(df["ub_factor"], errors="coerce").fillna(0)
+        ef = ef.where(ef > 0, 0).astype(float)
+    else:
+        ef = pd.Series(0.0, index=df.index)
+
+    if "ub_unit" in df.columns:
+        eu = df["ub_unit"].astype(str).str.lower().str.strip()
+    else:
+        eu = pd.Series([""]*len(df), index=df.index)
+
+    grams_desc = df["descripcion"].map(extract_weight_grams) if "descripcion" in df.columns else pd.Series([None]*len(df), index=df.index)
+    ml_desc    = df["descripcion"].map(extract_volume_ml)   if "descripcion" in df.columns else pd.Series([None]*len(df), index=df.index)
+    cnt_desc   = df["descripcion"].map(extract_count_units) if "descripcion" in df.columns else pd.Series([None]*len(df), index=df.index)
+
+    ub_factor_val = np.empty(len(df), dtype=float)
+    ub_unit_type  = np.empty(len(df), dtype=object)
+
+    for i in range(len(df)):
+        g, v, c, ef_i, eu_i = grams_desc.iloc[i], ml_desc.iloc[i], cnt_desc.iloc[i], ef.iloc[i], eu.iloc[i]
+        if g is not None:
+            ub_factor_val[i] = float(g);   ub_unit_type[i] = "g"
+        elif v is not None:
+            ub_factor_val[i] = float(v);   ub_unit_type[i] = "ml"
+        elif eu_i in {"kg","g"} and ef_i > 0:
+            grams = ef_i*1000.0 if eu_i == "kg" else ef_i
+            ub_factor_val[i] = float(grams); ub_unit_type[i] = "g"
+        elif eu_i in {"l","ml"} and ef_i > 0:
+            ml = ef_i*1000.0 if eu_i == "l" else ef_i
+            ub_factor_val[i] = float(ml);   ub_unit_type[i] = "ml"
+        elif ef_i > 0:
+            ub_factor_val[i] = float(ef_i); ub_unit_type[i] = "u"
+        elif c is not None and c > 0:
+            ub_factor_val[i] = float(c);    ub_unit_type[i] = "u"
+        else:
+            ub_factor_val[i] = 1.0;         ub_unit_type[i] = "u"
+
+    df["ub_factor_val"] = ub_factor_val
+    df["ub_unit_type"]  = ub_unit_type
+    df["ub_unidades"]   = (df["und_dia"].astype("Float64") * pd.Series(ub_factor_val, index=df.index).astype("Float64")).round().astype("Int64")
+
+    return df

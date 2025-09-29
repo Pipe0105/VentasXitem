@@ -11,6 +11,17 @@ from titles import build_title_resumido
 from utils import format_df_fast
 from ui import inject_css, topbar, kpi_row, chips_row, table_card, chart_card, footer_note
 
+# ================= Helpers seguros =================
+def _safe_int(v, default=0):
+    try:
+        return int(v) if pd.notna(v) else default
+    except Exception:
+        return default
+
+def _safe_sum_int(s: pd.Series, default=0) -> int:
+    v = pd.to_numeric(s, errors="coerce").sum()
+    return _safe_int(v, default=default)
+
 # ================= Page & Top UI =================
 st.set_page_config(page_title="Ventas x Item – UR / UB (multi-item)", layout="wide")
 inject_css()
@@ -38,7 +49,7 @@ except Exception as e:
 # ========= Presets de fecha (anclados a dtmax) =========
 def _set_range(days=None, this_month=False, prev_month=False):
     if "fecha_dt" in df and df["fecha_dt"].notna().any():
-        dtmax = df["fecha_dt"].max().date()  # último día con datos (en tu operación, ayer)
+        dtmax = df["fecha_dt"].max().date()  # último día con datos
         if days is not None:
             st.session_state["_date_range"] = (dtmax - timedelta(days=days-1), dtmax)
         elif this_month:
@@ -97,7 +108,7 @@ solo_con_datos = st.checkbox("Mostrar solo ítems con datos en el rango seleccio
 
 def _tiene_datos_en_rango(item_id: str) -> bool:
     try:
-        return ur_rango.get(str(item_id), 0) > 0
+        return _safe_int(ur_rango.get(str(item_id), 0)) > 0
     except Exception:
         return False
 
@@ -110,18 +121,18 @@ if solo_con_datos:
 else:
     visible_opts = all_opts
 
-# Etiquetas del multiselect
+# Etiquetas del multiselect (blindadas)
 if len(all_opts) and isinstance(all_opts[0], tuple):
     def fmt(opt):
         i, desc = opt
-        ur_full = int(sum_por_item_full.loc[(i, desc)])
-        ur_rng = int(ur_rango.get(str(i), 0))
+        ur_full = _safe_int(sum_por_item_full.loc[(i, desc)]) if (i, desc) in sum_por_item_full.index else 0
+        ur_rng  = _safe_int(ur_rango.get(str(i), 0))
         badge = f"UR rango: {ur_rng:,}".replace(",", ".") if ur_rng > 0 else "sin datos en rango"
         return f"{i} - {desc}  (UR total: {ur_full:,})  · {badge}".replace(",", ".")
 else:
     def fmt(i):
-        ur_full = int(sum_por_item_full.loc[i]) if i in sum_por_item_full.index else 0
-        ur_rng = int(ur_rango.get(str(i), 0))
+        ur_full = _safe_int(sum_por_item_full.loc[i]) if i in sum_por_item_full.index else 0
+        ur_rng  = _safe_int(ur_rango.get(str(i), 0))
         badge = f"UR rango: {ur_rng:,}".replace(",", ".") if ur_rng > 0 else "sin datos en rango"
         return f"{i}  (UR total: {ur_full:,})  · {badge}".replace(",", ".")
 
@@ -164,20 +175,12 @@ titulo_tabla = build_title_resumido(df_view, id_items_sel, top_groups=2)
 
 # ========= KPIs y delta vs periodo anterior =========
 df_sel = df_view[df_view["id_item"].isin(id_items_sel)]
-
-def _safe_sum_int(s: pd.Series) -> int:
-    v = pd.to_numeric(s, errors="coerce").sum()
-    try:
-        return int(v) if pd.notna(v) else 0
-    except Exception:
-        return 0
-
 ur_total = _safe_sum_int(df_sel["und_dia"])
 ub_total = _safe_sum_int(df_sel["ub_unidades"])
 
 # Sedes activas (UR>0)
 agg_sel = agg[agg["id_item"].isin(id_items_sel)]
-sedes_activas = int((agg_sel.groupby("sede_key")["UR"].sum() > 0).sum())
+sedes_activas = _safe_int((agg_sel.groupby("sede_key")["UR"].sum() > 0).sum())
 
 # Delta respecto al periodo anterior de igual largo
 if df_view["fecha_dt"].notna().any():
@@ -244,7 +247,8 @@ with tab3:
         chart = base
         if not serie.empty:
             idx_max = serie["valor"].idxmax()
-            dia_max, val_max = serie.loc[idx_max, "dia"], int(serie.loc[idx_max, "valor"])
+            dia_max = serie.loc[idx_max, "dia"]
+            val_max = _safe_int(serie.loc[idx_max, "valor"])
             rule = alt.Chart(pd.DataFrame({"dia": [dia_max]})).mark_rule(color="red").encode(x="dia:T")
             text = alt.Chart(pd.DataFrame({"dia":[dia_max], "txt":[f"Pico: {val_max:,}"]})).mark_text(dy=-10).encode(x="dia:T", text="txt:N")
             chart = base + rule + text
@@ -319,13 +323,6 @@ with tab4:
 # ========= Descarga a Excel (CON estilos) =========
 @st.cache_data(show_spinner=False)
 def to_excel_bytes_styled(df_out: pd.DataFrame, titulo_hoja: str = "reporte") -> bytes:
-    """
-    Exporta la tabla con estilos:
-      - Fila 'Acum. Mes:' en negrita
-      - Filas de domingos (Fecha termina en '/Dom') en rojo (toda la fila)
-      - Números con formato #,##0
-    Mantiene los números como números.
-    """
     df = df_out.copy()
     num_cols = [c for c in df.columns if c != "Fecha"]
     for c in num_cols:

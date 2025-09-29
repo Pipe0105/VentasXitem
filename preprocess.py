@@ -77,11 +77,6 @@ def extract_count_multiplier(text: str) -> int | None:
 # =========================
 
 def _build_sede_key(row: pd.Series) -> str:
-    """
-    'empresa|codigo' usando:
-      - empresa normalizada con unify_empresa()
-      - id_co si existe; si no, 'sede' o 'sede_cod'
-    """
     emp = unify_empresa(row.get("empresa", ""))
     co = str(row.get("id_co", "")).strip()
     if not co:
@@ -126,7 +121,7 @@ def _preprocess_core(df: pd.DataFrame) -> pd.DataFrame:
             df["id_item"] = "S/A"
     df["id_item"] = df["id_item"].astype(str)
 
-    # descripcion (guardamos original; normalizamos solo para parseo)
+    # descripcion (original)
     if "descripcion" not in df.columns:
         for c in df.columns:
             if "desc" in str(c).lower():
@@ -136,16 +131,16 @@ def _preprocess_core(df: pd.DataFrame) -> pd.DataFrame:
             df["descripcion"] = ""
     df["descripcion"] = df["descripcion"].fillna("").astype(str)
 
-    # und_dia (UR)
+    # und_dia (UR) → Int64 (nullable)
     if "und_dia" in df.columns:
-        df["und_dia"] = parse_und_dia_series(df["und_dia"]).fillna(0).astype(int)
+        df["und_dia"] = parse_und_dia_series(df["und_dia"]).astype("Int64")
     else:
         candidate = None
         for c in df.columns:
             if any(k in str(c).lower() for k in ("und", "ur", "cantidad", "cant")):
                 candidate = c
                 break
-        df["und_dia"] = parse_und_dia_series(df.get(candidate, pd.Series(dtype="object"))).fillna(0).astype(int)
+        df["und_dia"] = parse_und_dia_series(df.get(candidate, pd.Series(dtype="object"))).astype("Int64")
 
     # empresa / id_co → sede_key
     if "empresa" not in df.columns:
@@ -163,14 +158,14 @@ def _preprocess_core(df: pd.DataFrame) -> pd.DataFrame:
     desc = df["descripcion"].fillna("").astype(str)
     df["count_mult"] = desc.apply(extract_count_multiplier)  # xN o *UND→1 (None → 1 en el cómputo)
 
-    # ===== UB =====
-    df["ub_unidades"] = df.apply(_compute_ub_row, axis=1).astype(int)
+    # ===== UB ===== → Int64 (nullable)
+    df["ub_unidades"] = df.apply(_compute_ub_row, axis=1).astype("Int64")
 
     # ===== Campos de calendario que usa tables.py =====
-    df["dia_mes"] = df["fecha_dt"].dt.day
-    df["mes_num"] = df["fecha_dt"].dt.month
-    df["anio"]    = df["fecha_dt"].dt.year
-    df["dow_idx"] = df["fecha_dt"].dt.weekday
+    df["dia_mes"] = df["fecha_dt"].dt.day.astype("Int64")
+    df["mes_num"] = df["fecha_dt"].dt.month.astype("Int64")
+    df["anio"]    = df["fecha_dt"].dt.year.astype("Int64")
+    df["dow_idx"] = df["fecha_dt"].dt.weekday.astype("Int64")
 
     return df
 

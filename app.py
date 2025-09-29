@@ -1,4 +1,3 @@
-# app.py
 import io
 from datetime import timedelta
 import numpy as np
@@ -165,8 +164,16 @@ titulo_tabla = build_title_resumido(df_view, id_items_sel, top_groups=2)
 
 # ========= KPIs y delta vs periodo anterior =========
 df_sel = df_view[df_view["id_item"].isin(id_items_sel)]
-ur_total = int(df_sel["und_dia"].sum())
-ub_total = int(df_sel["ub_unidades"].sum())
+
+def _safe_sum_int(s: pd.Series) -> int:
+    v = pd.to_numeric(s, errors="coerce").sum()
+    try:
+        return int(v) if pd.notna(v) else 0
+    except Exception:
+        return 0
+
+ur_total = _safe_sum_int(df_sel["und_dia"])
+ub_total = _safe_sum_int(df_sel["ub_unidades"])
 
 # Sedes activas (UR>0)
 agg_sel = agg[agg["id_item"].isin(id_items_sel)]
@@ -179,7 +186,9 @@ if df_view["fecha_dt"].notna().any():
     prev_start = d1 - timedelta(days=days)
     prev_end   = d1 - timedelta(days=1)
     df_prev = df[(df["fecha_dt"].dt.date >= prev_start) & (df["fecha_dt"].dt.date <= prev_end) & (df["id_item"].isin(id_items_sel))]
-    ur_prev, ub_prev = int(df_prev["und_dia"].sum()), int(df_prev["ub_unidades"].sum())
+    ur_prev = _safe_sum_int(df_prev["und_dia"])
+    ub_prev = _safe_sum_int(df_prev["ub_unidades"])
+
     def _delta(cur, prev):
         if prev == 0: return "—"
         pct = (cur - prev) / prev * 100
@@ -227,7 +236,6 @@ with tab3:
 
     if modo == "Agregado selección":
         serie = df_metric.groupby("dia", as_index=False)[val_col].sum().rename(columns={val_col: "valor"})
-        # Gráfico
         base = alt.Chart(serie).mark_bar().encode(
             x=alt.X("dia:T", title="Día"),
             y=alt.Y("valor:Q", title=f"{metric_choice}"),
@@ -250,7 +258,6 @@ with tab3:
         )
 
     else:
-        # Por ítem
         serie = (df_metric.groupby(["dia","id_item"], as_index=False)[val_col].sum()
                           .rename(columns={val_col: "valor"}))
         serie_plot = serie.copy()

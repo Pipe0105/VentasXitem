@@ -1,4 +1,3 @@
-# utils.py
 import re, string, unicodedata
 import numpy as np
 import pandas as pd
@@ -108,37 +107,52 @@ def _order_sede_columns(cols):
 
 def _fecha_label_from_group(dias: pd.Series, mes_map: dict, anio: int = None, mes: int = None) -> pd.Series:
     """
-    Convierte el número de día en etiqueta 'día/dow' (ej. '5/Jue').
-    Si se conoce año y mes, se calcula el día de la semana real.
-    Si no se conocen, devuelve solo el día como string.
+    Devuelve etiquetas 'd/DOW' (p. ej. '5/Jue') o 'd' si no se puede inferir DOW.
+    - 'dias' puede ser dtype Int64 (nullable). Se toleran <NA>.
+    - 'mes_map' es un dict día->mes; si no hay entrada usa 'mes'.
+    - Si faltan año o mes para un día, se devuelve solo 'd'.
     """
-    labels = []
     dias_int = dias.astype("Int64")
+    labels = []
     for d in dias_int:
         if pd.isna(d):
             labels.append("")
             continue
-        d = int(d)
-        if anio and mes:
+        di = int(d)
+        mm = mes_map.get(di, mes)
+        yy = anio
+        if yy is not None and mm is not None:
             try:
-                fecha = pd.Timestamp(year=anio, month=mes, day=d)
+                fecha = pd.Timestamp(year=int(yy), month=int(mm), day=di)
                 dow = SPANISH_DOW[fecha.weekday()]  # 0=Lun .. 6=Dom
-                labels.append(f"{d}/{dow}")
+                labels.append(f"{di}/{dow}")
+                continue
             except Exception:
-                labels.append(str(d))
-        else:
-            labels.append(str(d))
+                pass
+        labels.append(str(di))
     return pd.Series(labels, index=dias.index)
 
 def format_df_fast(df_in: pd.DataFrame, dash_zero: bool) -> pd.DataFrame:
+    """
+    Formatea números para display sin romper con NaN:
+    - Si dash_zero=True: 0 -> '-', resto con miles.
+    - Si dash_zero=False: muestra miles; NaN -> '' (vacío).
+    """
     dfv = df_in.copy()
     num_cols = [c for c in dfv.columns if c != "Fecha"]
-    if dash_zero:
-        for c in num_cols:
-            s = pd.to_numeric(dfv[c], errors="coerce")
-            dfv[c] = np.where(s.fillna(0).astype(int) == 0, "-", s.map(lambda x: f"{int(x):,}".replace(",", ".")))
-    else:
-        for c in num_cols:
-            s = pd.to_numeric(dfv[c], errors="coerce")
-            dfv[c] = s.map(lambda x: f"{int(x):,}".replace(",", "."))
+    for c in num_cols:
+        s = pd.to_numeric(dfv[c], errors="coerce")
+        if dash_zero:
+            # 0 -> '-', NaN -> '', otros con miles
+            dfv[c] = np.where(
+                pd.isna(s), "",
+                np.where(s.fillna(0).astype(int) == 0, "-",
+                         pd.Series(s).map(lambda x: f"{int(x):,}".replace(",", ".")))
+            )
+        else:
+            # NaN -> '', otros con miles
+            dfv[c] = np.where(
+                pd.isna(s), "",
+                pd.Series(s).map(lambda x: f"{int(x):,}".replace(",", "."))
+            )
     return dfv

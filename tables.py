@@ -2,7 +2,6 @@ import pandas as pd
 from constants import SEDE_NAME_MAP
 from utils import _order_sede_columns, _fecha_label_from_group
 
-
 def aggregate_for_tables(df_in: pd.DataFrame) -> pd.DataFrame:
     """
     Agrega UR/UB por (día, mes, año, sede, item) y agrega nombre legible de sede.

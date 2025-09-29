@@ -23,12 +23,39 @@ def unify_empresa(v: str) -> str:
     return s
 
 def sede_key_to_name(sede_key: str) -> str:
-    emp, co = sede_key.split("|", 1)
+    """
+    Convierte 'empresa|codigo' a nombre amigable según SEDE_NAME_MAP.
+    Soporta entradas mal formadas: None, sin '|', con espacios, etc.
+    """
+    if sede_key is None:
+        return "na-NA"
+    s = str(sede_key).strip()
+    if not s:
+        return "na-NA"
+
+    # Partir solo en el primer '|'
+    if "|" in s:
+        emp, co = s.split("|", 1)
+    else:
+        emp, co = "na", s
+
     emp = emp.strip().lower()
-    co = co.strip()
+    co = str(co).strip()
+
     if emp in SEDE_NAME_MAP and co in SEDE_NAME_MAP[emp]:
         return SEDE_NAME_MAP[emp][co]
-    return f"{emp}-{co}"
+    return f"{emp}-{co or 'NA'}"
+
+def sede_keys_to_names(keys) -> list[str]:
+    """
+    Recibe lista/Serie/Index de 'empresa|codigo' y devuelve los nombres
+    amigables usando sede_key_to_name, preservando el orden.
+    """
+    if keys is None:
+        return []
+    if isinstance(keys, (pd.Index, pd.Series)):
+        return [sede_key_to_name(k) for k in list(keys)]
+    return [sede_key_to_name(k) for k in keys]
 
 # ---------------- Fechas ----------------
 def parse_dates_strict(series: pd.Series) -> pd.Series:
@@ -131,12 +158,20 @@ def _fecha_label_from_group(dias: pd.Series, mes_map: dict, anio: int = None, me
     return pd.Series(labels, index=dias.index)
 
 def format_df_fast(df_in: pd.DataFrame, dash_zero: bool) -> pd.DataFrame:
+    """
+    Formatea números y, si dash_zero=True, convierte 0 -> '-' (para UR y UB).
+    Mantiene 'Fecha' como texto.
+    """
     dfv = df_in.copy()
     num_cols = [c for c in dfv.columns if c != "Fecha"]
     if dash_zero:
         for c in num_cols:
             s = pd.to_numeric(dfv[c], errors="coerce")
-            dfv[c] = np.where(s.fillna(0).astype(int) == 0, "-", s.map(lambda x: f"{int(x):,}".replace(",", ".")))
+            dfv[c] = np.where(
+                s.fillna(0).astype(int) == 0,
+                "-",
+                s.map(lambda x: f"{int(x):,}".replace(",", "."))
+            )
     else:
         for c in num_cols:
             s = pd.to_numeric(dfv[c], errors="coerce")

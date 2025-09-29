@@ -1,125 +1,150 @@
-# tables.py
+from __future__ import annotations
 import pandas as pd
-from constants import SEDE_NAME_MAP
-from utils import _order_sede_columns, _fecha_label_from_group
+import numpy as np
 
-def aggregate_for_tables(df_in: pd.DataFrame) -> pd.DataFrame:
+SPANISH_DOW = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+
+# -------------------------------
+# 1) Agregado base para tablas
+# -------------------------------
+def aggregate_for_tables(df_view: pd.DataFrame) -> pd.DataFrame:
     """
-    Agrega UR/UB por (día, mes, año, sede, item) y agrega nombre legible de sede.
-    Espera que df_in ya esté filtrado por fechas (si aplica).
+    Retorna un DataFrame agregado por día/sede/item con UR y UB.
+    Columnas:
+      - fecha_dt, dia_mes, dow_idx
+      - sede_key, id_item
+      - UR, UB
     """
-    agg = (
-        df_in.groupby(
-            ["dia_mes", "mes_num", "anio", "sede_key", "id_item"],
-            as_index=False
-        ).agg(
-            UR=("und_dia", "sum"),
-            UB=("ub_unidades", "sum")
-        )
-    )
+    if df_view is None or df_view.empty:
+        return pd.DataFrame(columns=["fecha_dt","dia_mes","dow_idx","sede_key","id_item","UR","UB"])
 
-    # Nombre legible de sede a partir de sede_key = "empresa|id_co"
-    def _sede_name(k: str) -> str:
-        emp, co = str(k).split("|", 1)
-        emp, co = emp.strip().lower(), co.strip()
-        return SEDE_NAME_MAP.get(emp, {}).get(co, f"{emp}-{co}")
+    df = df_view.copy()
+    if "fecha_dt" not in df.columns:
+        return pd.DataFrame(columns=["fecha_dt","dia_mes","dow_idx","sede_key","id_item","UR","UB"])
 
-    agg["sede_name"] = agg["sede_key"].map(_sede_name)
-    return agg
+    # Normalizaciones mínimas
+    df["fecha_dt"] = pd.to_datetime(df["fecha_dt"], errors="coerce")
+    df = df[df["fecha_dt"].notna()].copy()
+    if df.empty:
+        return pd.DataFrame(columns=["fecha_dt","dia_mes","dow_idx","sede_key","id_item","UR","UB"])
+
+    df["dia_mes"] = df["fecha_dt"].dt.day
+    df["dow_idx"] = df["fecha_dt"].dt.weekday
+
+    # Columnas clave
+    for col, fill in [("sede_key", "S/A"), ("id_item", "S/A")]:
+        if col not in df.columns:
+            df[col] = fill
+    df["id_item"] = df["id_item"].astype(str)
+    df["sede_key"] = df["sede_key"].astype(str)
+
+    # Valores
+    ur = pd.to_numeric(df.get("und_dia", 0), errors="coerce").fillna(0)
+    ub = pd.to_numeric(df.get("ub_unidades", 0), errors="coerce").fillna(0)
+    df["und_dia"] = ur
+    df["ub_unidades"] = ub
+
+    grp = (df.groupby(["fecha_dt","dia_mes","dow_idx","sede_key","id_item"], as_index=False)
+             .agg(UR=("und_dia","sum"), UB=("ub_unidades","sum")))
+
+    grp["UR"] = grp["UR"].astype(int)
+    grp["UB"] = grp["UB"].astype(int)
+    return grp
 
 
+# -------------------------------
+# 2) Build tabla diaria (pivot)
+# -------------------------------
 def build_table_from_agg(agg: pd.DataFrame, id_items_sel: list[str], metric: str) -> pd.DataFrame:
     """
-    Construye la tabla final (por día x sede) para la métrica 'UR' o 'UB'.
-
-    - Asegura que salgan TODAS las sedes del mapa (aunque valgan 0).
-    - La columna 'Fecha' se muestra como 'día/DOW' (ej. '5/Jue').
-    - Agrega columna 'T. Dia' y una fila final 'Acum. Mes:'.
+    metric: "UR" o "UB".
+    Devuelve DataFrame con columnas: Fecha, <sedes...>, T. Día, y una fila final 'Acum. Mes:'.
     """
-    if not id_items_sel:
+    if agg is None or agg.empty:
         return pd.DataFrame()
 
-    sids = [str(x).strip() for x in id_items_sel]
-    dff = agg[agg["id_item"].isin(sids)]
-    if dff.empty:
+    metric = "UB" if str(metric).upper() == "UB" else "UR"
+    val_col = metric
+
+    data = agg[agg["id_item"].isin(id_items_sel)].copy()
+    if data.empty:
         return pd.DataFrame()
 
-    # Mapa "día -> mes (moda)" (se mantiene por compatibilidad)
-    m = (
-        dff.dropna(subset=["mes_num"])
-           .groupby("dia_mes")["mes_num"]
-           .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0])
+    # Etiqueta de Fecha: "d/Dow"
+    data["Fecha"] = (
+        data["dia_mes"].astype(int).astype(str) + "/" +
+        data["dow_idx"].astype(int).map(lambda i: SPANISH_DOW[i] if 0 <= i <= 6 else "")
     )
 
-    # Pivot principal
-    pv = dff.pivot_table(
-        index="dia_mes",
-        columns="sede_name",
-        values=metric,
-        aggfunc="sum",
-        fill_value=0
-    )
+    # Orden de sedes según aparición en los datos
+    sede_order = list(pd.Index(data["sede_key"]).drop_duplicates())
 
-    # Asegurar que estén todos los días presentes
-    all_days = sorted(dff["dia_mes"].dropna().unique())
-    pv = pv.reindex(all_days, fill_value=0)
+    # Pivot
+    piv = (data.pivot_table(index="Fecha", columns="sede_key", values=val_col, aggfunc="sum", fill_value=0)
+                .reindex(columns=sede_order, fill_value=0))
 
-    # Columnas esperadas (todas las sedes del mapa) + extras detectadas
-    full_cols = _order_sede_columns(list(pv.columns))
+    # Ordenar filas por día
+    idx_as_series = pd.Series(piv.index)
+    dia_nums = idx_as_series.str.split("/", n=1, expand=True)[0].astype(int)
+    piv = piv.iloc[np.argsort(dia_nums.to_numpy()), :]
 
-    # Inyectar columnas faltantes con 0 y reordenar
-    for c in full_cols:
-        if c not in pv.columns:
-            pv[c] = 0
-    pv = pv[full_cols]
+    # Total del día
+    piv["T. Día"] = piv.sum(axis=1)
 
-    # Fecha visible como día/DOW
-    pv = pv.reset_index().rename(columns={"dia_mes": "Fecha"})
+    # Reset index
+    piv = piv.reset_index()
 
-    # Detectar año y mes predominantes para calcular el día de la semana real
-    anio = int(dff["anio"].mode().iloc[0]) if "anio" in dff and dff["anio"].notna().any() else None
-    mes  = int(dff["mes_num"].mode().iloc[0]) if "mes_num" in dff and dff["mes_num"].notna().any() else None
+    # Fila de acumulado del rango
+    acum = pd.DataFrame([["Acum. Mes:"] + [int(piv[c].sum()) for c in piv.columns[1:]]], columns=piv.columns)
+    out = pd.concat([piv, acum], ignore_index=True)
 
-    pv["Fecha"] = _fecha_label_from_group(pv["Fecha"], m.to_dict(), anio=anio, mes=mes)
+    # Tipos numéricos
+    for c in out.columns:
+        if c != "Fecha":
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype(int)
 
-    # Asegurar enteros, totales por día
-    sede_cols = [c for c in pv.columns if c != "Fecha"]
-    for c in sede_cols:
-        pv[c] = pd.to_numeric(pv[c], errors="coerce").fillna(0).round().astype("Int64")
-    pv["T. Dia"] = pv[sede_cols].sum(axis=1).astype("Int64")
-
-    # Fila de acumulado del mes
-    acum_values = [int(pv[c].sum()) for c in sede_cols]
-    acum_total  = int(pv["T. Dia"].sum())
-    acum_row = pd.DataFrame(
-        [["Acum. Mes:"] + acum_values + [acum_total]],
-        columns=["Fecha"] + sede_cols + ["T. Dia"]
-    )
-    for c in sede_cols + ["T. Dia"]:
-        acum_row[c] = pd.to_numeric(acum_row[c], errors="coerce").astype("Int64")
-
-    final = pd.concat([pv, acum_row], ignore_index=True)
-
-    # 🔒 Garantía: máxima 1 fila "Acum. Mes:"
-    dup_mask = final["Fecha"].astype(str).eq("Acum. Mes:")
-    if dup_mask.sum() > 1:
-        final = pd.concat([final[~dup_mask], final[dup_mask].tail(1)], ignore_index=True)
-
-    return final.reset_index(drop=True)
+    return out
 
 
-# =================== Estilos para Streamlit ===================
-def style_table(df: pd.DataFrame):
+# -------------------------------
+# 3) Style para UI (Styler)
+# -------------------------------
+def style_table(df_in: pd.DataFrame | pd.io.formats.style.Styler):
     """
-    Aplica estilos:
-    - Fila de 'Acum. Mes:' → negrita
-    - Filas de domingos (Fecha termina en '/Dom') → texto rojo
+    - Resalta 'Acum. Mes:' en negrita.
+    - Domingos (Fecha termina en '/Dom') en rojo en toda la fila.
+    - Formato entero #,##0 para números.
+    Devuelve un pandas Styler.
     """
-    def highlight_rows(row):
-        if row["Fecha"] == "Acum. Mes:":
-            return ["font-weight: bold"] * len(row)
-        if isinstance(row["Fecha"], str) and row["Fecha"].endswith("/Dom"):
-            return ["color: red"] * len(row)
-        return [""] * len(row)
+    if isinstance(df_in, pd.io.formats.style.Styler):
+        sty = df_in
+        df = df_in.data
+    else:
+        df = df_in.copy()
+        sty = df.style
 
-    return df.style.apply(highlight_rows, axis=1)
+    if df.empty:
+        return sty
+
+    num_cols = [c for c in df.columns if c != "Fecha"]
+
+    def fmt_int(v):
+        try:
+            return f"{int(v):,}".replace(",", ".")
+        except Exception:
+            return v
+
+    sty = sty.format({c: fmt_int for c in num_cols})
+
+    def _bold_acum(row):
+        return ["font-weight: bold" if str(row.iloc[0]) == "Acum. Mes:" else "" for _ in row]
+
+    def _red_sundays(row):
+        fecha = str(row.iloc[0])
+        is_dom = fecha.endswith("/Dom")
+        return ["color: red" if is_dom else "" for _ in row]
+
+    sty = sty.apply(_bold_acum, axis=1)
+    sty = sty.apply(_red_sundays, axis=1)
+    sty = sty.set_properties(subset=["Fecha"], **{"width": "90px"})
+    return sty

@@ -1,175 +1,129 @@
-# tables.py
 from __future__ import annotations
-import math
 import pandas as pd
+import numpy as np
 
+from utils import sede_key_to_name, _order_sede_columns, SPANISH_DOW
+
+# Compat: obtener Styler de forma segura
 try:
-    import streamlit as st
+    from pandas.io.formats.style import Styler as _PandasStyler
 except Exception:
-    st = None  # Permite usar funciones en entornos sin Streamlit (tests, etc.)
+    _PandasStyler = None
 
-# --------- Compat: detectar Styler sin depender de rutas internas de pandas ----------
-try:
-    # En varias versiones existe esta importación; si falla, usamos fallback robusto
-    from pandas.io.formats.style import Styler as _PandasStyler  # type: ignore
-except Exception:
-    _PandasStyler = type(pd.DataFrame().style)
+# -------------------------------
+# 1) Agregado base para tablas
+# -------------------------------
+def aggregate_for_tables(df_view: pd.DataFrame) -> pd.DataFrame:
+    if df_view is None or df_view.empty:
+        return pd.DataFrame(columns=["fecha_dt","dia_mes","dow_idx","sede_key","id_item","UR","UB"])
 
+    df = df_view.copy()
+    if "fecha_dt" not in df.columns:
+        return pd.DataFrame(columns=["fecha_dt","dia_mes","dow_idx","sede_key","id_item","UR","UB"])
 
-def _is_styler(obj) -> bool:
-    """Detección robusta de Styler sin depender de pd.io.formats.style."""
-    if isinstance(obj, _PandasStyler):
-        return True
-    # Duck-typing: los Styler tienen .data (DataFrame) y .to_html()
-    return hasattr(obj, "data") and hasattr(obj, "to_html")
+    df["fecha_dt"] = pd.to_datetime(df["fecha_dt"], errors="coerce")
+    df = df[df["fecha_dt"].notna()].copy()
+    if df.empty:
+        return pd.DataFrame(columns=["fecha_dt","dia_mes","dow_idx","sede_key","id_item","UR","UB"])
 
+    df["dia_mes"] = df["fecha_dt"].dt.day
+    df["dow_idx"] = df["fecha_dt"].dt.weekday
+    for col, fill in [("sede_key", "na|NA"), ("id_item", "S/A")]:
+        if col not in df.columns:
+            df[col] = fill
+    df["id_item"] = df["id_item"].astype(str)
+    df["sede_key"] = df["sede_key"].astype(str)
 
-def _format_number(x, thousand_sep=".", decimal_sep=",", zero_as_dash=False):
-    """Formatea números para vista (no muta el DataFrame)."""
-    if x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x))):
-        return ""
-    if zero_as_dash and (x == 0 or x == 0.0):
-        return "-"
-    if isinstance(x, (int,)):
-        # Separador de miles
-        s = f"{x:,}"
-        return s.replace(",", "§").replace(".", thousand_sep).replace("§", thousand_sep)
-    if isinstance(x, float):
-        s = f"{x:,.2f}"
-        s = s.replace(",", "§").replace(".", decimal_sep).replace("§", thousand_sep)
-        return s
-    return x
+    ur = pd.to_numeric(df.get("und_dia", 0), errors="coerce").fillna(0)
+    ub = pd.to_numeric(df.get("ub_unidades", 0), errors="coerce").fillna(0)
+    df["und_dia"] = ur
+    df["ub_unidades"] = ub
 
+    grp = (df.groupby(["fecha_dt","dia_mes","dow_idx","sede_key","id_item"], as_index=False)
+             .agg(UR=("und_dia","sum"), UB=("ub_unidades","sum")))
 
-def style_table(
-    df_in,
-    *,
-    thousand_sep=".",
-    decimal_sep=",",
-    zero_as_dash=True,
-    precision=2,
-    hide_index=True,
-):
-    """
-    Acepta un DataFrame o un Styler y devuelve un Styler con formato.
-    - Evita usar pd.io.formats.style.* directamente (compatible con pandas 2.2+ / 2.3+).
-    - No altera los datos: solo formato para la vista.
-    """
-    if _is_styler(df_in):
-        sty = df_in  # ya viene como Styler
-        df = sty.data
-    else:
-        df = df_in
-        sty = df.style
+    grp["UR"] = grp["UR"].astype(int)
+    grp["UB"] = grp["UB"].astype(int)
+    return grp
 
-    # Columnas numéricas para aplicar formato consistente
-    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+# -------------------------------
+# 2) Build tabla diaria (pivot)
+# -------------------------------
+def build_table_from_agg(agg: pd.DataFrame, id_items_sel: list[str], metric: str) -> pd.DataFrame:
+    if agg is None or agg.empty:
+        return pd.DataFrame()
 
-    # Formato numérico con separadores y opción de dash para cero
-    if num_cols:
-        fmt_func = lambda x: _format_number(
-            x,
-            thousand_sep=thousand_sep,
-            decimal_sep=decimal_sep,
-            zero_as_dash=zero_as_dash,
-        )
-        sty = sty.format({c: fmt_func for c in num_cols}, na_rep="")
+    metric = "UB" if str(metric).upper() == "UB" else "UR"
+    val_col = metric
 
-    # Estilo básico de tabla (puedes ajustar a tu gusto)
-    sty = (
-        sty.set_table_styles(
-            [
-                {
-                    "selector": "th",
-                    "props": [("font-weight", "600"), ("text-align", "center")],
-                },
-                {
-                    "selector": "thead th",
-                    "props": [("position", "sticky"), ("top", "0"), ("background", "#fafafa")],
-                },
-                {"selector": "td", "props": [("vertical-align", "middle")]},
-            ]
-        )
-        .set_properties(**{"text-align": "right"})  # números a la derecha por defecto
+    data = agg[agg["id_item"].isin(id_items_sel)].copy()
+    if data.empty:
+        return pd.DataFrame()
+
+    data["Fecha"] = (
+        data["dia_mes"].astype(int).astype(str) + "/" +
+        data["dow_idx"].astype(int).map(lambda i: SPANISH_DOW[i] if 0 <= i <= 6 else "")
     )
 
-    # Tratar de ocultar índice si se pide
-    if hide_index:
+    data["sede_name"] = data["sede_key"].map(sede_key_to_name)
+    sede_order = _order_sede_columns(pd.Index(data["sede_name"]).drop_duplicates())
+
+    piv = (data.pivot_table(index="Fecha", columns="sede_name", values=val_col, aggfunc="sum", fill_value=0)
+                .reindex(columns=sede_order, fill_value=0))
+
+    idx_as_series = pd.Series(piv.index)
+    dia_nums = idx_as_series.str.split("/", n=1, expand=True)[0].astype(int)
+    piv = piv.iloc[np.argsort(dia_nums.to_numpy()), :]
+
+    piv["T. Día"] = piv.sum(axis=1)
+    piv = piv.reset_index()
+
+    acum = pd.DataFrame([["Acum. Mes:"] + [int(piv[c].sum()) for c in piv.columns[1:]]], columns=piv.columns)
+    out = pd.concat([piv, acum], ignore_index=True)
+
+    for c in out.columns:
+        if c != "Fecha":
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype(int)
+
+    return out
+
+# -------------------------------
+# 3) Style para UI
+# -------------------------------
+def style_table(df_in):
+    is_styler = _PandasStyler is not None and isinstance(df_in, _PandasStyler)
+
+    if is_styler:
+        sty = df_in
+        df = getattr(df_in, "data", None)
+        if df is None:
+            df = pd.DataFrame()
+    else:
+        df = df_in.copy()
+        sty = df.style
+
+    if df is None or df.empty:
+        return sty
+
+    num_cols = [c for c in df.columns if c != "Fecha"]
+
+    def fmt_int(v):
         try:
-            # pandas >= 1.4
-            sty = sty.hide(axis="index")
+            return f"{int(v):,}".replace(",", ".")
         except Exception:
-            # Fallback visual si hide no existe
-            sty = sty.set_table_styles(
-                sty.table_styles
-                + [
-                    {"selector": ".row_heading", "props": [("display", "none")]},
-                    {"selector": "th.blank", "props": [("display", "none")]},
-                ]
-            )
+            return v
 
+    sty = sty.format({c: fmt_int for c in num_cols})
+
+    def _bold_acum(row):
+        return ["font-weight: bold" if str(row.iloc[0]) == "Acum. Mes:" else "" for _ in row]
+
+    def _red_sundays(row):
+        fecha = str(row.iloc[0])
+        is_dom = fecha.endswith("/Dom")
+        return ["color: red" if is_dom else "" for _ in row]
+
+    sty = sty.apply(_bold_acum, axis=1)
+    sty = sty.apply(_red_sundays, axis=1)
+    sty = sty.set_properties(subset=["Fecha"], **{"width": "90px"})
     return sty
-
-
-def render_table(
-    df_or_styler,
-    *,
-    use_container_width=True,
-    height=None,
-    key=None,
-):
-    """
-    Renderiza usando Streamlit. Si no está disponible, retorna HTML del Styler.
-    - Para DataFrame: st.dataframe (mejor rendimiento).
-    - Para Styler: render por HTML para respetar estilos.
-    """
-    if st is None:
-        # ambiente sin streamlit (tests)
-        if _is_styler(df_or_styler):
-            return df_or_styler.to_html()
-        return df_or_styler
-
-    if _is_styler(df_or_styler):
-        html = df_or_styler.to_html()
-        st.write(html, unsafe_allow_html=True)
-    else:
-        st.dataframe(
-            df_or_styler,
-            use_container_width=use_container_width,
-            height=height,
-            key=key,
-        )
-
-
-def table_card(
-    df_or_styler,
-    titulo: str = "",
-    *,
-    styled: bool = True,
-    use_container_width: bool = True,
-    height=None,
-    key=None,
-):
-    """
-    Card sencilla con título + tabla.
-    Compat con llamadas existentes: table_card(style_table(df), titulo_tabla, styled=True)
-    """
-    if st is None:
-        # Sin Streamlit, devolver HTML o DataFrame
-        if _is_styler(df_or_styler):
-            return df_or_styler.to_html()
-        return df_or_styler
-
-    if titulo:
-        st.markdown(f"### {titulo}")
-
-    if styled:
-        # Si nos pasan DataFrame, lo stilyficamos mínimo para ocultar índice
-        obj = df_or_styler if _is_styler(df_or_styler) else style_table(df_or_styler)
-        render_table(obj, use_container_width=use_container_width, height=height, key=key)
-    else:
-        # Render directo de DataFrame
-        if _is_styler(df_or_styler):
-            render_table(df_or_styler, use_container_width=use_container_width, height=height, key=key)
-        else:
-            render_table(df_or_styler, use_container_width=use_container_width, height=height, key=key)

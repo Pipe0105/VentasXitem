@@ -1,7 +1,7 @@
-# tables.py
 import pandas as pd
 from constants import SEDE_NAME_MAP
 from utils import _order_sede_columns, _fecha_label_from_group
+
 
 def aggregate_for_tables(df_in: pd.DataFrame) -> pd.DataFrame:
     """
@@ -40,18 +40,23 @@ def build_table_from_agg(agg: pd.DataFrame, id_items_sel: list[str], metric: str
         return pd.DataFrame()
 
     sids = [str(x).strip() for x in id_items_sel]
-    dff = agg[agg["id_item"].isin(sids)]
+    dff = agg[agg["id_item"].astype(str).isin(sids)].copy()
     if dff.empty:
         return pd.DataFrame()
 
-    # Mapa "día -> mes (moda)" (se mantiene por compatibilidad)
-    m = (
-        dff.dropna(subset=["mes_num"])
-           .groupby("dia_mes")["mes_num"]
-           .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0])
-    )
+    # Mapa día -> mes (moda). Tolerante a NA.
+    m = {}
+    if "mes_num" in dff.columns and dff["mes_num"].notna().any():
+        m = (
+            dff.dropna(subset=["dia_mes", "mes_num"])
+               .groupby("dia_mes")["mes_num"]
+               .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0])
+               .to_dict()
+        )
 
     # Pivot principal
+    if metric not in ("UR", "UB"):
+        return pd.DataFrame()
     pv = dff.pivot_table(
         index="dia_mes",
         columns="sede_name",
@@ -62,7 +67,8 @@ def build_table_from_agg(agg: pd.DataFrame, id_items_sel: list[str], metric: str
 
     # Asegurar que estén todos los días presentes
     all_days = sorted(dff["dia_mes"].dropna().unique())
-    pv = pv.reindex(all_days, fill_value=0)
+    if len(all_days):
+        pv = pv.reindex(all_days, fill_value=0)
 
     # Columnas esperadas (todas las sedes del mapa) + extras detectadas
     full_cols = _order_sede_columns(list(pv.columns))
@@ -73,30 +79,49 @@ def build_table_from_agg(agg: pd.DataFrame, id_items_sel: list[str], metric: str
             pv[c] = 0
     pv = pv[full_cols]
 
-    # Fecha visible como día/DOW
+    # Fecha visible como día/DOW (tolerante a NA)
     pv = pv.reset_index().rename(columns={"dia_mes": "Fecha"})
 
-    # Detectar año y mes predominantes para calcular el día de la semana real
-    anio = int(dff["anio"].mode().iloc[0]) if "anio" in dff and dff["anio"].notna().any() else None
-    mes  = int(dff["mes_num"].mode().iloc[0]) if "mes_num" in dff and dff["mes_num"].notna().any() else None
+    # Detectar año y mes predominantes (sin castear a int si hay NaN)
+    anio = None
+    if "anio" in dff.columns and dff["anio"].notna().any():
+        try:
+            anio_mode = dff["anio"].mode()
+            anio = int(anio_mode.iloc[0]) if not anio_mode.empty and pd.notna(anio_mode.iloc[0]) else None
+        except Exception:
+            anio = None
 
-    pv["Fecha"] = _fecha_label_from_group(pv["Fecha"], m.to_dict(), anio=anio, mes=mes)
+    mes = None
+    if "mes_num" in dff.columns and dff["mes_num"].notna().any():
+        try:
+            mes_mode = dff["mes_num"].mode()
+            mes = int(mes_mode.iloc[0]) if not mes_mode.empty and pd.notna(mes_mode.iloc[0]) else None
+        except Exception:
+            mes = None
 
-    # Asegurar enteros, totales por día
+    pv["Fecha"] = _fecha_label_from_group(
+        pv["Fecha"].astype("Int64"),  # serie de días como Int64 (nullable)
+        m,                            # dict día -> mes (puede estar vacío)
+        anio=anio,
+        mes=mes
+    )
+
+    # Asegurar enteros y totales por día
     sede_cols = [c for c in pv.columns if c != "Fecha"]
     for c in sede_cols:
         pv[c] = pd.to_numeric(pv[c], errors="coerce").fillna(0).round().astype("Int64")
     pv["T. Dia"] = pv[sede_cols].sum(axis=1).astype("Int64")
 
-    # Fila de acumulado del mes
-    acum_values = [int(pv[c].sum()) for c in sede_cols]
-    acum_total  = int(pv["T. Dia"].sum())
+    # Fila de acumulado del mes (tolerante a NA)
+    acum_values = [pd.to_numeric(pv[c], errors="coerce").fillna(0).sum() for c in sede_cols]
+    acum_values = [pd.Series([v]).astype("Int64").iloc[0] for v in acum_values]
+    acum_total = pd.to_numeric(pv["T. Dia"], errors="coerce").fillna(0).sum()
+    acum_total = pd.Series([acum_total]).astype("Int64").iloc[0]
+
     acum_row = pd.DataFrame(
         [["Acum. Mes:"] + acum_values + [acum_total]],
         columns=["Fecha"] + sede_cols + ["T. Dia"]
     )
-    for c in sede_cols + ["T. Dia"]:
-        acum_row[c] = pd.to_numeric(acum_row[c], errors="coerce").astype("Int64")
 
     final = pd.concat([pv, acum_row], ignore_index=True)
 

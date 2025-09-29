@@ -1,258 +1,164 @@
-from __future__ import annotations
-import pandas as pd
+# preprocess.py
+import io
 import numpy as np
-
-from utils import sede_key_to_name, _order_sede_columns, SPANISH_DOW
-
-# Compat: obtener Styler de forma segura
-try:
-    from pandas.io.formats.style import Styler as _PandasStyler
-except Exception:
-    _PandasStyler = None
-
-# -------------------------------
-# 1) Agregado base para tablas
-# -------------------------------
-def aggregate_for_tables(df_view: pd.DataFrame) -> pd.DataFrame:
-    if df_view is None or df_view.empty:
-        return pd.DataFrame(columns=["fecha_dt","dia_mes","dow_idx","sede_key","id_item","UR","UB"])
-
-    df = df_view.copy()
-    if "fecha_dt" not in df.columns:
-        return pd.DataFrame(columns=["fecha_dt","dia_mes","dow_idx","sede_key","id_item","UR","UB"])
-
-    df["fecha_dt"] = pd.to_datetime(df["fecha_dt"], errors="coerce")
-    df = df[df["fecha_dt"].notna()].copy()
-    if df.empty:
-        return pd.DataFrame(columns=["fecha_dt","dia_mes","dow_idx","sede_key","id_item","UR","UB"])
-
-    df["dia_mes"] = df["fecha_dt"].dt.day
-    df["dow_idx"] = df["fecha_dt"].dt.weekday
-    for col, fill in [("sede_key", "na|NA"), ("id_item", "S/A")]:
-        if col not in df.columns:
-            df[col] = fill
-    df["id_item"] = df["id_item"].astype(str)
-    df["sede_key"] = df["sede_key"].astype(str)
-
-    ur = pd.to_numeric(df.get("und_dia", 0), errors="coerce").fillna(0)
-    ub = pd.to_numeric(df.get("ub_unidades", 0), errors="coerce").fillna(0)
-    df["und_dia"] = ur
-    df["ub_unidades"] = ub
-
-    grp = (df.groupby(["fecha_dt","dia_mes","dow_idx","sede_key","id_item"], as_index=False)
-             .agg(UR=("und_dia","sum"), UB=("ub_unidades","sum")))
-
-    grp["UR"] = grp["UR"].astype(int)
-    grp["UB"] = grp["UB"].astype(int)
-    return grp
-
-# -------------------------------
-# 2) Build tabla diaria (pivot)
-# -------------------------------
-def build_table_from_agg(agg: pd.DataFrame, id_items_sel: list[str], metric: str) -> pd.DataFrame:
-    if agg is None or agg.empty:
-        return pd.DataFrame()
-
-    metric = "UB" if str(metric).upper() == "UB" else "UR"
-    val_col = metric
-
-    data = agg[agg["id_item"].isin(id_items_sel)].copy()
-    if data.empty:
-        return pd.DataFrame()
-
-    data["Fecha"] = (
-        data["dia_mes"].astype(int).astype(str) + "/" +
-        data["dow_idx"].astype(int).map(lambda i: SPANISH_DOW[i] if 0 <= i <= 6 else "")
-    )
-
-    data["sede_name"] = data["sede_key"].map(sede_key_to_name)
-    sede_order = _order_sede_columns(pd.Index(data["sede_name"]).drop_duplicates())
-
-    piv = (data.pivot_table(index="Fecha", columns="sede_name", values=val_col, aggfunc="sum", fill_value=0)
-                .reindex(columns=sede_order, fill_value=0))
-
-    idx_as_series = pd.Series(piv.index)
-    dia_nums = idx_as_series.str.split("/", n=1, expand=True)[0].astype(int)
-    piv = piv.iloc[np.argsort(dia_nums.to_numpy()), :]
-
-    piv["T. Día"] = piv.sum(axis=1)
-    piv = piv.reset_index()
-
-    acum = pd.DataFrame([["Acum. Mes:"] + [int(piv[c].sum()) for c in piv.columns[1:]]], columns=piv.columns)
-    out = pd.concat([piv, acum], ignore_index=True)
-
-    for c in out.columns:
-        if c != "Fecha":
-            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype(int)
-
-    return out
-
-# -------------------------------
-# 3) Style para UI
-# -------------------------------
-def style_table(df_in):
-    is_styler = _PandasStyler is not None and isinstance(df_in, _PandasStyler)
-
-    if is_styler:
-        sty = df_in
-        df = getattr(df_in, "data", None)
-        if df is None:
-            df = pd.DataFrame()
-    else:
-        df = df_in.copy()
-        sty = df.style
-
-    if df is None or df.empty:
-        return sty
-
-    num_cols = [c for c in df.columns if c != "Fecha"]
-
-    def fmt_int(v):
-        try:
-            return f"{int(v):,}".replace(",", ".")
-        except Exception:
-            return v
-
-    sty = sty.format({c: fmt_int for c in num_cols})
-
-    def _bold_acum(row):
-        return ["font-weight: bold" if str(row.iloc[0]) == "Acum. Mes:" else "" for _ in row]
-
-    def _red_sundays(row):
-        fecha = str(row.iloc[0])
-        is_dom = fecha.endswith("/Dom")
-        return ["color: red" if is_dom else "" for _ in row]
-
-    sty = sty.apply(_bold_acum, axis=1)
-    sty = sty.apply(_red_sundays, axis=1)
-    sty = sty.set_properties(subset=["Fecha"], **{"width": "90px"})
-    return sty
-from __future__ import annotations
 import pandas as pd
-import numpy as np
+import re
+import streamlit as st
 
-from utils import sede_key_to_name, _order_sede_columns, SPANISH_DOW
+from utils import (
+    standardize_columns, unify_empresa, sede_key_to_name,
+    parse_dates_strict, extract_day_if_possible, parse_und_dia_series,
+    make_base_name
+)
 
-# Compat: obtener Styler de forma segura
-try:
-    from pandas.io.formats.style import Styler as _PandasStyler
-except Exception:
-    _PandasStyler = None
+# Parsers de UB (peso/volumen/conteo) para calcular UB por fila
+NUM = r"(\d+(?:[.,]\d+)?)"
+WEIGHT_RE = re.compile(rf"{NUM}\s*(kg|kilo|kilogramo|kilogramos|kg\.)|{NUM}\s*(g|gr|gramo|gramos|g\.)", re.IGNORECASE)
+VOL_RE    = re.compile(rf"{NUM}\s*(l|lt|litro|litros|l\.)|{NUM}\s*(cl|centilitro|centilitros)|{NUM}\s*(ml|mililitro|mililitros)", re.IGNORECASE)
+COUNT_RE  = re.compile(r"(?:x\s*(\d{1,5}))|(?:\b(\d{1,5})\s*(?:u|un|und|uds|unid|unids|unidades|huevos?)\b)", re.IGNORECASE)
 
-# -------------------------------
-# 1) Agregado base para tablas
-# -------------------------------
-def aggregate_for_tables(df_view: pd.DataFrame) -> pd.DataFrame:
-    if df_view is None or df_view.empty:
-        return pd.DataFrame(columns=["fecha_dt","dia_mes","dow_idx","sede_key","id_item","UR","UB"])
+def _to_float(x):
+    try:
+        return float(str(x).replace(",", "."))
+    except Exception:
+        return None
 
-    df = df_view.copy()
-    if "fecha_dt" not in df.columns:
-        return pd.DataFrame(columns=["fecha_dt","dia_mes","dow_idx","sede_key","id_item","UR","UB"])
+def extract_weight_grams(text: str):
+    if not isinstance(text, str) or not text.strip():
+        return None
+    m = WEIGHT_RE.search(text)
+    if not m:
+        return None
+    if m.group(1):
+        kg = _to_float(m.group(1))
+        return int(round(kg * 1000)) if kg is not None else None
+    if m.group(3):
+        g = _to_float(m.group(3))
+        return int(round(g)) if g is not None else None
+    return None
 
-    df["fecha_dt"] = pd.to_datetime(df["fecha_dt"], errors="coerce")
-    df = df[df["fecha_dt"].notna()].copy()
-    if df.empty:
-        return pd.DataFrame(columns=["fecha_dt","dia_mes","dow_idx","sede_key","id_item","UR","UB"])
+def extract_volume_ml(text: str):
+    if not isinstance(text, str) or not text.strip():
+        return None
+    m = VOL_RE.search(text)
+    if not m:
+        return None
+    if m.group(1):
+        l = _to_float(m.group(1))
+        return int(round(l * 1000)) if l is not None else None
+    if m.group(3):
+        cl = _to_float(m.group(3))
+        return int(round(cl * 10)) if cl is not None else None
+    if m.group(5):
+        ml = _to_float(m.group(5))
+        return int(round(ml)) if ml is not None else None
+    return None
 
-    df["dia_mes"] = df["fecha_dt"].dt.day
-    df["dow_idx"] = df["fecha_dt"].dt.weekday
-    for col, fill in [("sede_key", "na|NA"), ("id_item", "S/A")]:
-        if col not in df.columns:
-            df[col] = fill
-    df["id_item"] = df["id_item"].astype(str)
-    df["sede_key"] = df["sede_key"].astype(str)
+def extract_count_units(text: str):
+    if not isinstance(text, str) or not text.strip():
+        return None
+    m = COUNT_RE.search(text)
+    if not m:
+        return None
+    for g in (m.group(1), m.group(2)):
+        if g:
+            try:
+                n = int(g)
+                return n if 1 <= n <= 5000 else None
+            except Exception:
+                continue
+    return None
 
-    ur = pd.to_numeric(df.get("und_dia", 0), errors="coerce").fillna(0)
-    ub = pd.to_numeric(df.get("ub_unidades", 0), errors="coerce").fillna(0)
-    df["und_dia"] = ur
-    df["ub_unidades"] = ub
-
-    grp = (df.groupby(["fecha_dt","dia_mes","dow_idx","sede_key","id_item"], as_index=False)
-             .agg(UR=("und_dia","sum"), UB=("ub_unidades","sum")))
-
-    grp["UR"] = grp["UR"].astype(int)
-    grp["UB"] = grp["UB"].astype(int)
-    return grp
-
-# -------------------------------
-# 2) Build tabla diaria (pivot)
-# -------------------------------
-def build_table_from_agg(agg: pd.DataFrame, id_items_sel: list[str], metric: str) -> pd.DataFrame:
-    if agg is None or agg.empty:
-        return pd.DataFrame()
-
-    metric = "UB" if str(metric).upper() == "UB" else "UR"
-    val_col = metric
-
-    data = agg[agg["id_item"].isin(id_items_sel)].copy()
-    if data.empty:
-        return pd.DataFrame()
-
-    data["Fecha"] = (
-        data["dia_mes"].astype(int).astype(str) + "/" +
-        data["dow_idx"].astype(int).map(lambda i: SPANISH_DOW[i] if 0 <= i <= 6 else "")
-    )
-
-    data["sede_name"] = data["sede_key"].map(sede_key_to_name)
-    sede_order = _order_sede_columns(pd.Index(data["sede_name"]).drop_duplicates())
-
-    piv = (data.pivot_table(index="Fecha", columns="sede_name", values=val_col, aggfunc="sum", fill_value=0)
-                .reindex(columns=sede_order, fill_value=0))
-
-    idx_as_series = pd.Series(piv.index)
-    dia_nums = idx_as_series.str.split("/", n=1, expand=True)[0].astype(int)
-    piv = piv.iloc[np.argsort(dia_nums.to_numpy()), :]
-
-    piv["T. Día"] = piv.sum(axis=1)
-    piv = piv.reset_index()
-
-    acum = pd.DataFrame([["Acum. Mes:"] + [int(piv[c].sum()) for c in piv.columns[1:]]], columns=piv.columns)
-    out = pd.concat([piv, acum], ignore_index=True)
-
-    for c in out.columns:
-        if c != "Fecha":
-            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype(int)
-
-    return out
-
-# -------------------------------
-# 3) Style para UI
-# -------------------------------
-def style_table(df_in):
-    is_styler = _PandasStyler is not None and isinstance(df_in, _PandasStyler)
-
-    if is_styler:
-        sty = df_in
-        df = getattr(df_in, "data", None)
-        if df is None:
-            df = pd.DataFrame()
+# --------- CACHE principal: lee/normaliza todo y deja df listo ---------
+@st.cache_data(show_spinner=False)
+def preprocess_cached(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    # Leer archivo
+    if filename.lower().endswith(".csv"):
+        df_raw = pd.read_csv(io.BytesIO(file_bytes))
     else:
-        df = df_in.copy()
-        sty = df.style
+        df_raw = pd.read_excel(io.BytesIO(file_bytes))
 
-    if df is None or df.empty:
-        return sty
+    # Normalizar columnas
+    df = standardize_columns(df_raw)
 
-    num_cols = [c for c in df.columns if c != "Fecha"]
+    required = {"empresa", "fecha_dcto", "id_co", "id_item", "und_dia"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Faltan columnas requeridas (después de normalizar): {missing}")
 
-    def fmt_int(v):
-        try:
-            return f"{int(v):,}".replace(",", ".")
-        except Exception:
-            return v
+    # Fechas
+    parsed = parse_dates_strict(df["fecha_dcto"])
+    if parsed.notna().any():
+        df["fecha_dt"] = parsed
+        df["dia_mes"]  = parsed.dt.day.astype("Int64")
+        df["mes_num"]  = parsed.dt.month.astype("Int64")
+        df["anio"]     = parsed.dt.year.astype("Int64")
+    else:
+        df["fecha_dt"] = pd.NaT
+        day = extract_day_if_possible(df["fecha_dcto"])
+        if day.isna().all():
+            raise ValueError("No pude interpretar 'fecha_dcto'. Usa fecha completa (ej. 24/09/2025) o día 1..31.")
+        df["dia_mes"] = day
+        df["mes_num"] = pd.Series([pd.NA]*len(df), dtype="Int64")
+        df["anio"]    = pd.Series([pd.NA]*len(df), dtype="Int64")
 
-    sty = sty.format({c: fmt_int for c in num_cols})
+    # Normalizaciones clave
+    df["empresa"] = df["empresa"].map(unify_empresa)
+    idco_num = pd.to_numeric(df["id_co"], errors="coerce")
+    df["id_co"] = (idco_num.round().astype("Int64").astype(str)
+                   if idco_num.notna().any() else df["id_co"].astype(str))
+    df["sede_key"] = df["empresa"].astype(str).str.lower().str.strip() + "|" + df["id_co"].astype(str).str.strip()
+    df["id_item"] = df["id_item"].astype(str).str.strip()
 
-    def _bold_acum(row):
-        return ["font-weight: bold" if str(row.iloc[0]) == "Acum. Mes:" else "" for _ in row]
+    if "descripcion" in df.columns:
+        df["descripcion"] = df["descripcion"].astype(str)
+        df["desc_base"]   = df["descripcion"].map(make_base_name)
+    else:
+        df["desc_base"]   = ""
 
-    def _red_sundays(row):
-        fecha = str(row.iloc[0])
-        is_dom = fecha.endswith("/Dom")
-        return ["color: red" if is_dom else "" for _ in row]
+    # UR
+    df["und_dia"] = parse_und_dia_series(df["und_dia"])
 
-    sty = sty.apply(_bold_acum, axis=1)
-    sty = sty.apply(_red_sundays, axis=1)
-    sty = sty.set_properties(subset=["Fecha"], **{"width": "90px"})
-    return sty
+    # UB
+    if "ub_factor" in df.columns:
+        ef = pd.to_numeric(df["ub_factor"], errors="coerce").fillna(0)
+        ef = ef.where(ef > 0, 0).astype(float)
+    else:
+        ef = pd.Series(0.0, index=df.index)
+
+    if "ub_unit" in df.columns:
+        eu = df["ub_unit"].astype(str).str.lower().str.strip()
+    else:
+        eu = pd.Series([""]*len(df), index=df.index)
+
+    grams_desc = df["descripcion"].map(extract_weight_grams) if "descripcion" in df.columns else pd.Series([None]*len(df), index=df.index)
+    ml_desc    = df["descripcion"].map(extract_volume_ml)   if "descripcion" in df.columns else pd.Series([None]*len(df), index=df.index)
+    cnt_desc   = df["descripcion"].map(extract_count_units) if "descripcion" in df.columns else pd.Series([None]*len(df), index=df.index)
+
+    ub_factor_val = np.empty(len(df), dtype=float)
+    ub_unit_type  = np.empty(len(df), dtype=object)
+
+    for i in range(len(df)):
+        g, v, c, ef_i, eu_i = grams_desc.iloc[i], ml_desc.iloc[i], cnt_desc.iloc[i], ef.iloc[i], eu.iloc[i]
+        if g is not None:
+            ub_factor_val[i] = float(g);   ub_unit_type[i] = "g"
+        elif v is not None:
+            ub_factor_val[i] = float(v);   ub_unit_type[i] = "ml"
+        elif eu_i in {"kg","g"} and ef_i > 0:
+            grams = ef_i*1000.0 if eu_i == "kg" else ef_i
+            ub_factor_val[i] = float(grams); ub_unit_type[i] = "g"
+        elif eu_i in {"l","ml"} and ef_i > 0:
+            ml = ef_i*1000.0 if eu_i == "l" else ef_i
+            ub_factor_val[i] = float(ml);   ub_unit_type[i] = "ml"
+        elif ef_i > 0:
+            ub_factor_val[i] = float(ef_i); ub_unit_type[i] = "u"
+        elif c is not None and c > 0:
+            ub_factor_val[i] = float(c);    ub_unit_type[i] = "u"
+        else:
+            ub_factor_val[i] = 1.0;         ub_unit_type[i] = "u"
+
+    df["ub_factor_val"] = ub_factor_val
+    df["ub_unit_type"]  = ub_unit_type
+    df["ub_unidades"]   = (df["und_dia"].astype("Float64") * pd.Series(ub_factor_val, index=df.index).astype("Float64")).round().astype("Int64")
+
+    return df

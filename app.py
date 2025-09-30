@@ -39,16 +39,51 @@ if not uploaded:
     st.stop()
 
 # ========= Lectura + preproceso (cacheado) =========
+def _csv_bytes_to_utf8(file_bytes: bytes) -> bytes:
+    """
+    Intenta decodificar el CSV como UTF-8; si falla, prueba UTF-16 (LE/BE) y luego Latin-1.
+    Devuelve bytes re-encodificados en UTF-8.
+    """
+    # 1) Ya es UTF-8
+    try:
+        file_bytes.decode("utf-8")
+        return file_bytes
+    except Exception:
+        pass
+
+    # 2) UTF-16 variantes
+    for enc in ("utf-16", "utf-16-le", "utf-16-be"):
+        try:
+            txt = file_bytes.decode(enc)
+            return txt.encode("utf-8")
+        except Exception:
+            continue
+
+    # 3) Latin-1 (ISO-8859-1) + fallback con replace
+    try:
+        txt = file_bytes.decode("latin-1")
+        return txt.encode("utf-8")
+    except Exception:
+        txt = file_bytes.decode("latin-1", errors="replace")
+        return txt.encode("utf-8")
+
 file_bytes = uploaded.getvalue()
+filename = uploaded.name
+
 try:
-    df = preprocess_cached(file_bytes, uploaded.name)
+    # Normalizar CSV a UTF-8 para evitar errores de códec
+    if filename.lower().endswith(".csv"):
+        file_bytes = _csv_bytes_to_utf8(file_bytes)
+
+    # Preproceso cacheado
+    df = preprocess_cached(file_bytes, filename)
 except Exception as e:
     st.error(str(e))
     st.stop()
 
 # ========= Presets de fecha (anclados a dtmax) =========
 def _set_range(days=None, this_month=False, prev_month=False):
-    if "fecha_dt" in df and df["fecha_dt"].notna().any():
+    if ("fecha_dt" in df.columns) and df["fecha_dt"].notna().any():
         dtmax = df["fecha_dt"].max().date()
         if days is not None:
             st.session_state["_date_range"] = (dtmax - timedelta(days=days-1), dtmax)
@@ -68,7 +103,7 @@ with colp3: st.button("Este mes", use_container_width=True, on_click=_set_range,
 with colp4: st.button("Mes anterior", use_container_width=True, on_click=_set_range, kwargs={"prev_month":True})
 
 # ========= Filtro de rango de fechas =========
-if df["fecha_dt"].notna().any():
+if ("fecha_dt" in df.columns) and df["fecha_dt"].notna().any():
     min_date = df["fecha_dt"].min().date()
     max_date = df["fecha_dt"].max().date()
     value_range = st.session_state.get("_date_range", (min_date, max_date))
@@ -183,7 +218,7 @@ agg_sel = agg[agg["id_item"].isin(id_items_sel)]
 sedes_activas = _safe_int((agg_sel.groupby("sede_key")["UR"].sum() > 0).sum())
 
 # Delta respecto al periodo anterior de igual largo
-if df_view["fecha_dt"].notna().any():
+if ("fecha_dt" in df_view.columns) and df_view["fecha_dt"].notna().any():
     d1, d2 = df_view["fecha_dt"].min().date(), df_view["fecha_dt"].max().date()
     days = (d2 - d1).days + 1
     prev_start = d1 - timedelta(days=days)
@@ -204,7 +239,7 @@ else:
 kpi_row(ur_total, ub_total, sedes_activas, ur_delta=ur_delta, ub_delta=ub_delta)
 
 # Texto de rango
-if df_view["fecha_dt"].notna().any():
+if ("fecha_dt" in df_view.columns) and df_view["fecha_dt"].notna().any():
     r1 = df_view["fecha_dt"].min().strftime("%d/%b/%Y")
     r2 = df_view["fecha_dt"].max().strftime("%d/%b/%Y")
     rango_txt = f"{r1} – {r2}"
@@ -234,7 +269,11 @@ with tab3:
     metric_choice = st.radio("Métrica", ["UR", "UB"], horizontal=True, key="metric_pico")
     modo = st.radio("Ver:", ["Agregado selección", "Por ítem"], horizontal=True, key="modo_pico")
     df_metric = df_sel.copy()
-    df_metric["dia"] = df_metric["fecha_dt"].dt.date
+    if ("fecha_dt" in df_metric.columns) and df_metric["fecha_dt"].notna().any():
+        df_metric["dia"] = df_metric["fecha_dt"].dt.date
+    else:
+        # Si no hay fecha completa, evitamos error y no graficamos
+        df_metric["dia"] = pd.NaT
     val_col = "und_dia" if metric_choice == "UR" else "ub_unidades"
 
     if modo == "Agregado selección":
@@ -245,7 +284,7 @@ with tab3:
             tooltip=[alt.Tooltip("dia:T", title="Día"), alt.Tooltip("valor:Q", title=metric_choice, format=",.0f")]
         )
         chart = base
-        if not serie.empty:
+        if not serie.empty and serie["valor"].notna().any():
             idx_max = serie["valor"].idxmax()
             dia_max = serie.loc[idx_max, "dia"]
             val_max = _safe_int(serie.loc[idx_max, "valor"])
@@ -392,8 +431,9 @@ st.download_button(
 # ========= Diagnóstico opcional =========
 if debug:
     with st.expander("🔎 Diagnóstico"):
-        st.write("Fechas (min/max):", str(df["fecha_dt"].min()), "→", str(df["fecha_dt"].max()))
-        st.write("Días únicos en vista:", sorted(df_view["dia_mes"].dropna().unique()))
+        st.write("Fechas (min/max):", str(df["fecha_dt"].min()) if "fecha_dt" in df.columns else "—",
+                 "→", str(df["fecha_dt"].max()) if "fecha_dt" in df.columns else "—")
+        st.write("Días únicos en vista:", sorted(df_view["dia_mes"].dropna().unique()) if "dia_mes" in df_view.columns else "—")
         st.write("IDs seleccionados:", id_items_sel)
         st.write("Muestra df_view:", df_view.head(10))
         st.write("UR por ítem en rango:", ur_rango.head(15))
